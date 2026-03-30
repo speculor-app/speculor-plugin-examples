@@ -22,6 +22,9 @@ cmake --build build
 | **pattern_generator** | Generates a scrolling gradient | Frame output, pool allocation, custom parameters, FPS pacing |
 | **brightness_filter** | Adjusts brightness/contrast | Frame input/output, OpenCV, `cv_helpers.h`, passthrough optimization |
 | **frame_stats** | Computes image statistics | Multiple outputs, enum parameters, logging |
+| **gpu_invert** | Inverts colors on GPU | Vulkan compute shader, `GpuPipelineBase`, CPU fallback, `.gpu_compute()` |
+| **signal_spectrometer** | Real-valued signal spectrum | Signal input, `on_signal` callback, ring buffer, FFT, frame rendering |
+| **iq_spectrometer** | I/Q complex signal spectrum | I/Q signal schema, complex FFT, signal metadata, `SPC_DECLARE_PLUGIN` with signal handler |
 
 ## Plugin Structure
 

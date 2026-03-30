@@ -1,0 +1,10 @@
+spc_add_plugin(gpu_invert SOURCES gpu_invert_plugin.cpp)
+
+if(SPC_VULKAN_FOUND AND SPC_GLSLANG_VALIDATOR)
+    message(STATUS "gpu_invert: Vulkan found — building with GPU acceleration")
+    spc_enable_gpu(gpu_invert)
+    spc_add_gpu_shaders(gpu_invert SHADERS invert.comp)
+    target_sources(gpu_invert PRIVATE gpu_invert_pipeline.h gpu_invert_pipeline.cpp)
+else()
+    message(STATUS "gpu_invert: Vulkan not available — building CPU-only")
+endif()

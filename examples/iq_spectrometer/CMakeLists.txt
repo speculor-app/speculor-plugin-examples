@@ -1,0 +1,1 @@
+spc_add_plugin(iq_spectrometer SOURCES iq_spectrometer_plugin.cpp)
