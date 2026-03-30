@@ -1,0 +1,1 @@
+spc_add_plugin(hello_scalar SOURCES hello_scalar_plugin.cpp)
