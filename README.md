@@ -24,7 +24,7 @@ cmake --build build
 | **frame_stats** | Computes image statistics | Multiple outputs, enum parameters, logging |
 | **gpu_invert** | Inverts colors on GPU | Vulkan compute shader, `GpuPipelineBase`, CPU fallback, `.gpu_compute()` |
 | **signal_spectrometer** | Real-valued signal spectrum | Signal input, `on_signal` callback, ring buffer, FFT, frame rendering |
-| **iq_spectrometer** | I/Q complex signal spectrum | I/Q signal schema, complex FFT, signal metadata, `SPC_DECLARE_PLUGIN` with signal handler |
+| **iq_spectrometer** | I/Q complex signal spectrum | I/Q signal schema, complex FFT, signal metadata, `SPC_PLUGIN_VTABLE` with `.on_signal` handler |
 
 ## Plugin Structure
 
@@ -66,8 +66,15 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
 }
 
 // 6. Export vtable
-SPC_DECLARE_PLUGIN_FILTER(get_descriptor, create_instance, destroy_instance,
-                          set_parameter, get_parameter, process)
+SPC_PLUGIN_VTABLE(
+    .get_descriptor    = get_descriptor,
+    .create_instance   = create_instance,
+    .destroy_instance  = destroy_instance,
+    .set_parameter     = set_parameter,
+    .get_parameter     = get_parameter,
+    .process           = process,
+    .set_host_services = set_host_services
+)
 ```
 
 ## CMakeLists.txt for Your Plugin

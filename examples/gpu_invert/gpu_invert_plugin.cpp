@@ -138,5 +138,12 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
     return 0;
 }
 
-SPC_DECLARE_PLUGIN_SOURCE(get_descriptor, create_instance, destroy_instance,
-                          nullptr, nullptr, process, start, stop)
+SPC_PLUGIN_VTABLE(
+    .get_descriptor    = get_descriptor,
+    .create_instance   = create_instance,
+    .destroy_instance  = destroy_instance,
+    .process           = process,
+    .start             = start,
+    .stop              = stop,
+    .set_host_services = set_host_services
+)

@@ -4,7 +4,7 @@
 //   - Signal input port (.input_signal with I/Q field schema)
 //   - on_signal callback (runs on producer thread, lock-free ring buffer)
 //   - SPC_PLUGIN_SIGNAL_CALLBACK macro
-//   - SPC_DECLARE_PLUGIN with signal handler (10th argument)
+//   - SPC_PLUGIN_VTABLE with .on_signal slot
 //   - Ring buffer for cross-thread signal transfer
 //   - Simple FFT (pocketfft) for spectrum computation
 //   - Frame output with pixel rendering
@@ -206,6 +206,15 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/,
 }
 
 // export vtable with signal handler as 10th argument
-SPC_DECLARE_PLUGIN(get_descriptor, create_instance, destroy_instance,
-                   set_parameter, get_parameter, process, start, stop,
-                   set_host_services, on_signal)
+SPC_PLUGIN_VTABLE(
+    .get_descriptor    = get_descriptor,
+    .create_instance   = create_instance,
+    .destroy_instance  = destroy_instance,
+    .set_parameter     = set_parameter,
+    .get_parameter     = get_parameter,
+    .process           = process,
+    .start             = start,
+    .stop              = stop,
+    .set_host_services = set_host_services,
+    .on_signal         = on_signal
+)

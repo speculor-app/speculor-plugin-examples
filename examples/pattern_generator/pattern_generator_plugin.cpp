@@ -126,5 +126,12 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/,
     return 0;
 }
 
-SPC_DECLARE_PLUGIN_FILTER(get_descriptor, create_instance, destroy_instance,
-                          set_parameter, get_parameter, process)
+SPC_PLUGIN_VTABLE(
+    .get_descriptor    = get_descriptor,
+    .create_instance   = create_instance,
+    .destroy_instance  = destroy_instance,
+    .set_parameter     = set_parameter,
+    .get_parameter     = get_parameter,
+    .process           = process,
+    .set_host_services = set_host_services
+)

@@ -7,7 +7,7 @@
 //   - DescriptorBuilder for metadata, parameters, and ports
 //   - SPC_PLUGIN_AUTO_PARAMS for zero-boilerplate parameter handling
 //   - spc::set_scalar_output for typed output
-//   - SPC_DECLARE_PLUGIN_FILTER for the vtable export
+//   - SPC_PLUGIN_VTABLE for the vtable export
 
 #include <speculor/plugin_helpers.h>
 
@@ -45,5 +45,12 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/,
 }
 
 // export the vtable — this is what the engine loads
-SPC_DECLARE_PLUGIN_FILTER(get_descriptor, create_instance, destroy_instance,
-                          set_parameter, get_parameter, process)
+SPC_PLUGIN_VTABLE(
+    .get_descriptor    = get_descriptor,
+    .create_instance   = create_instance,
+    .destroy_instance  = destroy_instance,
+    .set_parameter     = set_parameter,
+    .get_parameter     = get_parameter,
+    .process           = process,
+    .set_host_services = set_host_services
+)

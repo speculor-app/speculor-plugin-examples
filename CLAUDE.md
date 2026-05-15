@@ -66,12 +66,12 @@ Deploy built plugins to the Speculor application's `plugins/` directory.
 
 | Example | SDK Features Demonstrated |
 |---------|--------------------------|
-| **hello_scalar** | `SPC_PLUGIN()`, `SPC_PLUGIN_DESCRIPTOR()`, `SPC_PLUGIN_AUTO_PARAMS()`, `SPC_DECLARE_PLUGIN_FILTER()`, scalar output |
+| **hello_scalar** | `SPC_PLUGIN()`, `SPC_PLUGIN_DESCRIPTOR()`, `SPC_PLUGIN_AUTO_PARAMS()`, `SPC_PLUGIN_VTABLE()`, scalar output |
 | **pattern_generator** | Manual `create_instance()`/`destroy_instance()`, frame pool allocation (`host.acquire_frame()`), FPS pacing, fallback buffers, `.frame_alloc()` capability |
-| **image_filter** | Frame input/output, OpenCV integration (`cv_helpers.h`), passthrough optimization, `start()`/`stop()` callbacks, `SPC_DECLARE_PLUGIN_SOURCE()` |
+| **image_filter** | Frame input/output, OpenCV integration (`cv_helpers.h`), passthrough optimization, `start()`/`stop()` callbacks, `SPC_PLUGIN_VTABLE` with `.start` / `.stop` |
 | **multi_io** | Multiple frame outputs, enum parameters, logging macros |
 | **gpu_invert** | Vulkan compute shaders, `GpuPipelineBase`, `spc_enable_gpu()`, `spc_add_gpu_shaders()`, `#ifdef SPC_HAS_VULKAN` CPU fallback, push constants, SSBOs |
-| **signal_spectrometer** | Signal input, `on_signal()` callback, `SpcRingBuffer` (lock-free SPSC), FFT (pocketfft), frame rendering, `SPC_DECLARE_PLUGIN()` full vtable |
+| **signal_spectrometer** | Signal input, `on_signal()` callback, `SpcRingBuffer` (lock-free SPSC), FFT (pocketfft), frame rendering, `SPC_PLUGIN_VTABLE` with `.on_signal` |
 | **iq_spectrometer** | I/Q signal input with custom field schema, `SPC_PLUGIN_SIGNAL_CALLBACK()`, complex FFT, signal metadata (`center_freq_hz`, `sample_rate_hz`) |
 
 ## Plugin State Macros
@@ -82,12 +82,21 @@ SPC_PLUGIN_CAST(StateType)                  // Manual state casting only
 SPC_PLUGIN_HOST_SERVICES(StateType, field)  // Manual host services injection
 ```
 
-## Plugin Export Macros
+## Plugin Export
 
 ```cpp
-SPC_DECLARE_PLUGIN_FILTER(...)              // Stateless filter (no start/stop)
-SPC_DECLARE_PLUGIN_SOURCE(...)              // Streaming source (with start/stop)
-SPC_DECLARE_PLUGIN(...)                     // Full vtable (with signal handler)
+SPC_PLUGIN_VTABLE(
+    .get_descriptor    = get_descriptor,
+    .create_instance   = create_instance,
+    .destroy_instance  = destroy_instance,
+    .set_parameter     = set_parameter,
+    .get_parameter     = get_parameter,
+    .process           = process,
+    .set_host_services = set_host_services,
+    // add .start / .stop / .on_signal / .on_event / .record_gpu / .scan_devices /
+    // .validate_mandatory / .request_stop / .get_list_rows / .set_list_rows
+    // as your plugin needs them — fields must appear in struct-declaration order
+)
 ```
 
 ## Key Files
