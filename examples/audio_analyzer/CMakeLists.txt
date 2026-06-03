@@ -1,0 +1,1 @@
+spc_add_plugin(audio_analyzer SOURCES audio_analyzer_plugin.cpp)

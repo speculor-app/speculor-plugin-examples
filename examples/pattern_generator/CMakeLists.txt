@@ -1,1 +1,0 @@
-spc_add_plugin(pattern_generator SOURCES pattern_generator_plugin.cpp)
