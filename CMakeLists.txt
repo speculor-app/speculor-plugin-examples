@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # download a release from
 #   https://github.com/speculor-app/speculor-sdk-dist/releases
 # extract it, and point CMAKE_PREFIX_PATH at the extracted folder:
-#   cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=/path/to/SpeculorSDK-0.13.0-...
+#   cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=/path/to/SpeculorSDK-0.13.1-...
 find_package(SpeculorSDK REQUIRED)
 include(PluginHelpers)      # spc_add_plugin / spc_enable_gpu / spc_add_gpu_shaders
 include(CompilerWarnings)   # spc_set_warnings

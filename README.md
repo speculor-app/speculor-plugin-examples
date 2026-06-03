@@ -21,7 +21,7 @@ can wire up in the app.
 
    ```bash
    cmake -S . -B build -G Ninja \
-     -DCMAKE_PREFIX_PATH=/path/to/SpeculorSDK-0.13.0-Linux-x86_64
+     -DCMAKE_PREFIX_PATH=/path/to/SpeculorSDK-0.13.1-Linux-x86_64
    cmake --build build
    ```
 
@@ -29,7 +29,7 @@ can wire up in the app.
 
    ```powershell
    cmake -S . -B build -G Ninja `
-     -DCMAKE_PREFIX_PATH=C:\path\to\SpeculorSDK-0.13.0-Windows-x64
+     -DCMAKE_PREFIX_PATH=C:\path\to\SpeculorSDK-0.13.1-Windows-x64
    cmake --build build
    ```
 
