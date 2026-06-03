@@ -33,6 +33,14 @@ can wire up in the app.
    cmake --build build
    ```
 
+   > **Linux note:** examples that link `spclib` (here: `blob_detect`,
+   > `bbox_display`, `wmv_bgs`) pull in the SDK's FFmpeg, which is built with
+   > VA-API hardware acceleration. Install the VA-API/DRM system libraries
+   > before building:
+   > ```bash
+   > sudo apt-get install -y libva-dev libdrm-dev
+   > ```
+
 3. **Copy the built plugins** from `build/plugins/` into Speculor's `plugins/`
    directory and restart the app — they'll appear in the node palette.
 

@@ -54,9 +54,12 @@ jobs:
           echo "Resolved SDK root: $root"
 
       # ── Linux toolchain ──────────────────────────────────────────────
-      - name: Install Ninja (Linux)
+      # ninja to build; libva/libdrm because the SDK's bundled FFmpeg is built
+      # with VA-API hardware acceleration, so linking spclib pulls -lva/-lva-drm
+      # (system libraries, not shipped in the bundle).
+      - name: Install Linux build deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libva-dev libdrm-dev
 
       # ── Windows toolchain (MSVC + Ninja) ─────────────────────────────
       # vcvarsall via vswhere — works on the VS2022 image and stays valid if
