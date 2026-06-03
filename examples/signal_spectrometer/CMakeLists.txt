@@ -1,1 +1,0 @@
-spc_add_plugin(signal_spectrometer SOURCES signal_spectrometer_plugin.cpp)

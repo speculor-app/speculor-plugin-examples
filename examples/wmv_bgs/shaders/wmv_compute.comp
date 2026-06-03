@@ -1,0 +1,101 @@
+#version 450
+
+// Weighted Moving Variance BGS — single dispatch per frame
+// each thread processes 4 consecutive pixels, writes packed uint32 output
+// supports mono (1 ch) and color (3 ch) 8-bit input
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    int num_channels;       // 1 or 3
+    float weight1;
+    float weight2;
+    float weight3;
+    float threshold_sq;     // threshold² (0 = output variance directly)
+    int width4;             // ceil(width / 4)
+    int has_mask;
+    int pad0;
+} pc;
+
+layout(std430, set = 0, binding = 0) readonly buffer Frame0 { uint data[]; } frame0;
+layout(std430, set = 0, binding = 1) readonly buffer Frame1 { uint data[]; } frame1;
+layout(std430, set = 0, binding = 2) readonly buffer Frame2 { uint data[]; } frame2;
+layout(std430, set = 0, binding = 3) readonly buffer Mask   { uint data[]; } detect_mask;
+layout(std430, set = 0, binding = 4) writeonly buffer Out   { uint data[]; } output_mask;
+
+float rb0(int i) { return float((frame0.data[i >> 2] >> ((i & 3) * 8)) & 0xFFu); }
+float rb1(int i) { return float((frame1.data[i >> 2] >> ((i & 3) * 8)) & 0xFFu); }
+float rb2(int i) { return float((frame2.data[i >> 2] >> ((i & 3) * 8)) & 0xFFu); }
+uint  rbm(int i) { return (detect_mask.data[i >> 2] >> ((i & 3) * 8)) & 0xFFu; }
+
+uint compute_pixel(int pixel)
+{
+    if (pc.has_mask != 0 && rbm(pixel) == 0u)
+        return 0u;
+
+    float result;
+
+    if (pc.num_channels == 1)
+    {
+        float i1 = rb0(pixel), i2 = rb1(pixel), i3 = rb2(pixel);
+        float mean = i1 * pc.weight1 + i2 * pc.weight2 + i3 * pc.weight3;
+        float d1 = i1 - mean, d2 = i2 - mean, d3 = i3 - mean;
+        float var = d1*d1*pc.weight1 + d2*d2*pc.weight2 + d3*d3*pc.weight3;
+
+        if (pc.threshold_sq > 0.0)
+            result = (var > pc.threshold_sq) ? 255.0 : 0.0;
+        else
+            result = sqrt(var);
+    }
+    else
+    {
+        int b = pixel * 3;
+        float r1 = rb0(b), g1 = rb0(b+1), b1 = rb0(b+2);
+        float r2 = rb1(b), g2 = rb1(b+1), b2_ = rb1(b+2);
+        float r3 = rb2(b), g3 = rb2(b+1), b3 = rb2(b+2);
+
+        float mR = r1*pc.weight1 + r2*pc.weight2 + r3*pc.weight3;
+        float mG = g1*pc.weight1 + g2*pc.weight2 + g3*pc.weight3;
+        float mB = b1*pc.weight1 + b2_*pc.weight2 + b3*pc.weight3;
+
+        float dr1=r1-mR, dr2=r2-mR, dr3=r3-mR;
+        float dg1=g1-mG, dg2=g2-mG, dg3=g3-mG;
+        float db1=b1-mB, db2=b2_-mB, db3=b3-mB;
+
+        float vR = dr1*dr1*pc.weight1 + dr2*dr2*pc.weight2 + dr3*dr3*pc.weight3;
+        float vG = dg1*dg1*pc.weight1 + dg2*dg2*pc.weight2 + dg3*dg3*pc.weight3;
+        float vB = db1*db1*pc.weight1 + db2*db2*pc.weight2 + db3*db3*pc.weight3;
+
+        if (pc.threshold_sq > 0.0)
+        {
+            float luma_var = 0.299*vR + 0.587*vG + 0.114*vB;
+            result = (luma_var > pc.threshold_sq) ? 255.0 : 0.0;
+        }
+        else
+        {
+            result = 0.299*sqrt(vR) + 0.587*sqrt(vG) + 0.114*sqrt(vB);
+        }
+    }
+
+    return uint(clamp(result, 0.0, 255.0));
+}
+
+void main()
+{
+    int gx = int(gl_GlobalInvocationID.x); // 0..width4-1
+    int y = int(gl_GlobalInvocationID.y);
+
+    if (gx >= pc.width4 || y >= pc.height) return;
+
+    int x0 = gx * 4;
+    int base = y * pc.width;
+    int count = min(4, pc.width - x0);
+
+    uint p[4] = uint[4](0u, 0u, 0u, 0u);
+    for (int i = 0; i < count; i++)
+        p[i] = compute_pixel(base + x0 + i);
+
+    output_mask.data[y * pc.width4 + gx] = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+}

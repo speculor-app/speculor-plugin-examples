@@ -1,0 +1,1 @@
+spc_add_plugin(pattern_source SOURCES pattern_source_plugin.cpp)

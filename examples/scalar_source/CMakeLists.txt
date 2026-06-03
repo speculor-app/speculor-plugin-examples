@@ -1,0 +1,1 @@
+spc_add_plugin(scalar_source SOURCES scalar_source_plugin.cpp)

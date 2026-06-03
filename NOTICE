@@ -1,0 +1,19 @@
+Speculor Plugin Examples
+Copyright 2026 Fabio Barros
+
+This product includes software developed by Fabio Barros, licensed under
+the Apache License, Version 2.0 (see LICENSE).
+
+These example plugins are first-party source code only; this repository does
+not vendor any third-party libraries. When compiled, each plugin links against
+the Speculor Plugin SDK and, through it, against the third-party libraries
+bundled in the SDK (OpenCV, FFmpeg, Vulkan, Eigen, libjpeg-turbo, pocketfft,
+and others). Those components are governed by their own license terms, which
+are reproduced in `THIRD_PARTY_NOTICES.md` inside the Speculor SDK distribution
+you build against:
+
+  <https://github.com/speculor-app/speculor-sdk-dist/releases>
+
+Redistributing a built plugin binary that statically links the SDK's helper
+libraries carries those third-party attribution obligations; redistributing
+this example source code does not.
