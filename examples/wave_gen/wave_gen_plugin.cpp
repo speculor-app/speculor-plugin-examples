@@ -13,6 +13,15 @@ enum { F_AMPLITUDE = 0, FIELD_COUNT };
 constexpr uint32_t min_batch = 64;
 constexpr uint32_t max_batch = 8192;
 
+// GUI-thread-set parameters, snapshotted on the worker (H6)
+struct Params
+{
+    int32_t wave_type = 0;    // 0=Sine, 1=Square, 2=Triangle, 3=Sawtooth
+    float frequency = 440.0f;
+    float amplitude = 0.5f;
+    int32_t sample_rate = 44100;
+};
+
 // internal state
 struct WaveGenState
 {
@@ -21,11 +30,8 @@ struct WaveGenState
     uint32_t offsets[FIELD_COUNT];
     uint32_t stride;
 
-    // waveform parameters
-    int32_t wave_type;    // 0=Sine, 1=Square, 2=Triangle, 3=Sawtooth
-    float frequency;
-    float amplitude;
-    int32_t sample_rate;
+    // cross-thread parameter block (GUI writes, worker snapshots per frame)
+    spc::SharedParams<Params> params;
 
     // synthesis state
     double phase;         // continuous phase accumulator [0, 1)
@@ -83,10 +89,6 @@ SPC_PLUGIN_DESCRIPTOR(
 static SpcPluginInstance* create_instance()
 {
     auto* s = new WaveGenState{};
-    s->wave_type = 0;
-    s->frequency = 440.0f;
-    s->amplitude = 0.5f;
-    s->sample_rate = 44100;
     s->phase = 0.0;
     s->sample_count = 0;
 
@@ -107,26 +109,43 @@ static void destroy_instance(SpcPluginInstance* inst)
 
 // --- parameters ---
 
-SPC_PLUGIN_AUTO_PARAMS(WaveGenState,
-    SPC_BIND_ENUM(WaveGenState, "wave_type", wave_type),
-    SPC_BIND_FLOAT(WaveGenState, "frequency", frequency),
-    SPC_BIND_FLOAT(WaveGenState, "amplitude", amplitude),
-    SPC_BIND_INT(WaveGenState, "sample_rate", sample_rate),
-)
+static int set_parameter(SpcPluginInstance* inst, const char* name,
+                         const SpcParameterDesc* value)
+{
+    bool matched = state(inst)->params.update([&](Params& p) {
+        return spc::try_set_enum (name, value, "wave_type",   p.wave_type)
+            || spc::try_set_float(name, value, "frequency",   p.frequency)
+            || spc::try_set_float(name, value, "amplitude",   p.amplitude)
+            || spc::try_set_int  (name, value, "sample_rate", p.sample_rate);
+    });
+    return matched ? 0 : -1;
+}
+
+static int get_parameter(SpcPluginInstance* inst, const char* name,
+                         SpcParameterDesc* out)
+{
+    const Params p = state(inst)->params.snapshot();
+    if (spc::try_get_enum (name, out, "wave_type",   p.wave_type)) return 0;
+    if (spc::try_get_float(name, out, "frequency",   p.frequency)) return 0;
+    if (spc::try_get_float(name, out, "amplitude",   p.amplitude)) return 0;
+    if (spc::try_get_int  (name, out, "sample_rate", p.sample_rate)) return 0;
+    return -1;
+}
 
 // --- streaming ---
 
 static int start(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
+    const Params p = s->params.snapshot();
     s->phase = 0.0;
     s->sample_count = 0;
     s->start_time = std::chrono::steady_clock::now();
     SPC_LOG_INFO(&s->host.cached_log, "Wave Generator started (%.0f Hz %s, %d Hz sample rate)",
-                 s->frequency,
-                 s->wave_type == 0 ? "sine" : s->wave_type == 1 ? "square"
-                     : s->wave_type == 2 ? "triangle" : "sawtooth",
-                 s->sample_rate);
+                 p.frequency,
+                 p.wave_type == 0 ? "sine" : p.wave_type == 1 ? "square"
+                     : p.wave_type == 2 ? "triangle" : "sawtooth",
+                 p.sample_rate);
     return 0;
 }
 
@@ -146,12 +165,14 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     auto* s = state(inst);
     if (output_count < 1) return -1;
 
+    const Params p = s->params.snapshot();  // one consistent view per frame
+
     // compute how many samples should have been produced by now
     auto now = std::chrono::steady_clock::now();
     auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
         now - s->start_time).count();
     auto expected = static_cast<uint64_t>(
-        static_cast<double>(elapsed_us) * static_cast<double>(s->sample_rate) / 1e6);
+        static_cast<double>(elapsed_us) * static_cast<double>(p.sample_rate) / 1e6);
 
     auto to_generate = (expected > s->sample_count)
         ? static_cast<uint32_t>(std::min(expected - s->sample_count,
@@ -162,7 +183,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     if (to_generate < min_batch) {
         auto needed = s->sample_count + min_batch;
         auto target_us = static_cast<int64_t>(
-            static_cast<double>(needed) / static_cast<double>(s->sample_rate) * 1e6);
+            static_cast<double>(needed) / static_cast<double>(p.sample_rate) * 1e6);
         auto sleep_us = target_us - elapsed_us;
         if (sleep_us > 0)
             std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
@@ -172,7 +193,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
         elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
             now - s->start_time).count();
         expected = static_cast<uint64_t>(
-            static_cast<double>(elapsed_us) * static_cast<double>(s->sample_rate) / 1e6);
+            static_cast<double>(elapsed_us) * static_cast<double>(p.sample_rate) / 1e6);
         to_generate = (expected > s->sample_count)
             ? static_cast<uint32_t>(std::min(expected - s->sample_count,
                                              static_cast<uint64_t>(max_batch)))
@@ -183,11 +204,11 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
 
     if (spc_table_resize(&s->output_table, to_generate) != 0) return -1;
 
-    double phase_inc = static_cast<double>(s->frequency) / static_cast<double>(s->sample_rate);
+    double phase_inc = static_cast<double>(p.frequency) / static_cast<double>(p.sample_rate);
 
     for (uint32_t i = 0; i < to_generate; ++i)
     {
-        float sample = generate_sample(s->wave_type, s->phase, s->amplitude);
+        float sample = generate_sample(p.wave_type, s->phase, p.amplitude);
         spc_table_set_float(&s->output_table, i, s->offsets[F_AMPLITUDE], sample);
 
         s->phase += phase_inc;
@@ -197,7 +218,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     // timestamp from cumulative sample position
     s->output_table.frame_number = s->sample_count / min_batch;
     s->output_table.timestamp_us = static_cast<int64_t>(
-        static_cast<double>(s->sample_count) / static_cast<double>(s->sample_rate) * 1e6);
+        static_cast<double>(s->sample_count) / static_cast<double>(p.sample_rate) * 1e6);
 
     s->sample_count += to_generate;
 

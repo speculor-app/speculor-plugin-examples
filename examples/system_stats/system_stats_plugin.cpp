@@ -5,10 +5,24 @@
 SPC_PLUGIN_CAST(SystemStatsState)
 SPC_PLUGIN_HOST_SERVICES(SystemStatsState, host)
 
-SPC_PLUGIN_AUTO_PARAMS(SystemStatsState,
-    SPC_BIND_INT(SystemStatsState, "update_interval_sec", update_interval_sec),
-    SPC_BIND_STRING(SystemStatsState, "disk_path", disk_path),
-)
+static int set_parameter(SpcPluginInstance* inst, const char* name,
+                         const SpcParameterDesc* value)
+{
+    bool matched = state(inst)->params.update([&](Params& p) {
+        return spc::try_set_int   (name, value, "update_interval_sec", p.update_interval_sec)
+            || spc::try_set_string(name, value, "disk_path", p.disk_path);
+    });
+    return matched ? 0 : -1;
+}
+
+static int get_parameter(SpcPluginInstance* inst, const char* name,
+                         SpcParameterDesc* out)
+{
+    const Params p = state(inst)->params.snapshot();
+    if (spc::try_get_int   (name, out, "update_interval_sec", p.update_interval_sec)) return 0;
+    if (spc::try_get_string(name, out, "disk_path", p.disk_path)) return 0;
+    return -1;
+}
 
 #ifdef _WIN32
 static constexpr const char* SPC_DEFAULT_DISK_PATH = "C:\\";
@@ -97,8 +111,9 @@ static int start(SpcPluginInstance* inst)
     s->last_emit = std::chrono::steady_clock::now();
     s->frame_number = 0;
 
+    const Params p = s->params.snapshot();
     SPC_LOG_INFO(&s->host.cached_log, "System Stats started (interval: %d sec, disk: %s)",
-                 s->update_interval_sec, s->disk_path);
+                 p.update_interval_sec, p.disk_path);
     return 0;
 }
 
@@ -120,9 +135,11 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     auto* s = state(inst);
     if (output_count < 2) return -1;
 
+    const Params p = s->params.snapshot();  // one consistent view per frame
+
     // pacing: sleep until next interval
     auto now = std::chrono::steady_clock::now();
-    auto interval = std::chrono::seconds(s->update_interval_sec);
+    auto interval = std::chrono::seconds(p.update_interval_sec);
     auto elapsed = now - s->last_emit;
 
     if (elapsed < interval) {
@@ -135,7 +152,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     // --- sample all metrics ---
     float cpu_pct = sample_cpu_usage(s);
     auto mem = sample_memory();
-    auto disk = sample_disk(s->disk_path);
+    auto disk = sample_disk(p.disk_path);
     auto net = sample_network();
     float proc_cpu = sample_proc_cpu(s);
     uint32_t proc_mem = sample_proc_mem_mb();
@@ -181,9 +198,9 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     // --- build JSON record ---
     // escape backslashes in disk_path for JSON
     std::string escaped_disk;
-    for (const char* p = s->disk_path; *p; ++p) {
-        if (*p == '\\') escaped_disk += "\\\\";
-        else escaped_disk += *p;
+    for (const char* dp = p.disk_path; *dp; ++dp) {
+        if (*dp == '\\') escaped_disk += "\\\\";
+        else escaped_disk += *dp;
     }
 
     s->record_json = "{";

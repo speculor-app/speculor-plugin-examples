@@ -4,11 +4,9 @@
 
 // --- state ---
 
-struct LogicGateState
+// GUI-thread-set parameters, snapshotted on the worker (H6)
+struct Params
 {
-    spc::HostServices host;
-
-    // params
     int32_t function = 0;       // 0=AND, 1=OR, 2=XOR, 3=NAND, 4=NOR, 5=MAJORITY, 6=THRESHOLD
     int32_t input_count = 2;    // 2-4 active inputs
     int32_t threshold = 2;      // for THRESHOLD mode: at least N inputs true
@@ -17,11 +15,17 @@ struct LogicGateState
     int32_t invert_2 = 0;
     int32_t invert_3 = 0;
     int32_t edge_mode = 0;      // 0=level, 1=rising, 2=falling, 3=both
-
-    // control message output
     char cmd_param[SPC_PARAM_STRING_MAX] = "";
     float cmd_true_value = 1.0f;
     float cmd_false_value = 0.0f;
+};
+
+struct LogicGateState
+{
+    spc::HostServices host;
+
+    // cross-thread parameter block (GUI writes, worker snapshots per frame)
+    spc::SharedParams<Params> params;
 
     // runtime state
     bool last_values[4] = {};   // last-seen per-input values (for stale non-blocking inputs)
@@ -77,30 +81,54 @@ SPC_PLUGIN_DESCRIPTOR(
         .streaming()
 )
 
-SPC_PLUGIN_AUTO_PARAMS(LogicGateState,
-    SPC_BIND_ENUM(LogicGateState, "function", function),
-    SPC_BIND_INT(LogicGateState, "input_count", input_count),
-    SPC_BIND_INT(LogicGateState, "threshold", threshold),
-    SPC_BIND_BOOL(LogicGateState, "invert_0", invert_0),
-    SPC_BIND_BOOL(LogicGateState, "invert_1", invert_1),
-    SPC_BIND_BOOL(LogicGateState, "invert_2", invert_2),
-    SPC_BIND_BOOL(LogicGateState, "invert_3", invert_3),
-    SPC_BIND_ENUM(LogicGateState, "edge_mode", edge_mode),
-    SPC_BIND_STRING(LogicGateState, "cmd_param", cmd_param),
-    SPC_BIND_FLOAT(LogicGateState, "cmd_true_value", cmd_true_value),
-    SPC_BIND_FLOAT(LogicGateState, "cmd_false_value", cmd_false_value)
-)
+static int set_parameter(SpcPluginInstance* inst, const char* name,
+                         const SpcParameterDesc* value)
+{
+    bool matched = state(inst)->params.update([&](Params& p) {
+        return spc::try_set_enum  (name, value, "function", p.function)
+            || spc::try_set_int   (name, value, "input_count", p.input_count)
+            || spc::try_set_int   (name, value, "threshold", p.threshold)
+            || spc::try_set_bool  (name, value, "invert_0", p.invert_0)
+            || spc::try_set_bool  (name, value, "invert_1", p.invert_1)
+            || spc::try_set_bool  (name, value, "invert_2", p.invert_2)
+            || spc::try_set_bool  (name, value, "invert_3", p.invert_3)
+            || spc::try_set_enum  (name, value, "edge_mode", p.edge_mode)
+            || spc::try_set_string(name, value, "cmd_param", p.cmd_param)
+            || spc::try_set_float (name, value, "cmd_true_value", p.cmd_true_value)
+            || spc::try_set_float (name, value, "cmd_false_value", p.cmd_false_value);
+    });
+    return matched ? 0 : -1;
+}
+
+static int get_parameter(SpcPluginInstance* inst, const char* name,
+                         SpcParameterDesc* out)
+{
+    const Params p = state(inst)->params.snapshot();
+    if (spc::try_get_enum  (name, out, "function", p.function)) return 0;
+    if (spc::try_get_int   (name, out, "input_count", p.input_count)) return 0;
+    if (spc::try_get_int   (name, out, "threshold", p.threshold)) return 0;
+    if (spc::try_get_bool  (name, out, "invert_0", p.invert_0)) return 0;
+    if (spc::try_get_bool  (name, out, "invert_1", p.invert_1)) return 0;
+    if (spc::try_get_bool  (name, out, "invert_2", p.invert_2)) return 0;
+    if (spc::try_get_bool  (name, out, "invert_3", p.invert_3)) return 0;
+    if (spc::try_get_enum  (name, out, "edge_mode", p.edge_mode)) return 0;
+    if (spc::try_get_string(name, out, "cmd_param", p.cmd_param)) return 0;
+    if (spc::try_get_float (name, out, "cmd_true_value", p.cmd_true_value)) return 0;
+    if (spc::try_get_float (name, out, "cmd_false_value", p.cmd_false_value)) return 0;
+    return -1;
+}
 
 // --- lifecycle ---
 
 static int start(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
+    const Params p = s->params.snapshot();
     for (auto& v : s->last_values) v = false;
     s->prev_result = false;
     s->has_prev = false;
     SPC_LOG_INFO(&s->host.cached_log, "Logic Gate started (function=%d, inputs=%d)",
-                 s->function, s->input_count);
+                 p.function, p.input_count);
     return 0;
 }
 
@@ -113,20 +141,20 @@ static int stop(SpcPluginInstance* inst)
 
 // --- evaluate ---
 
-static bool evaluate(LogicGateState* s, const bool* inputs, int n)
+static bool evaluate(const Params& p, const bool* inputs, int n)
 {
     int true_count = 0;
     for (int i = 0; i < n; ++i)
         if (inputs[i]) ++true_count;
 
-    switch (s->function) {
+    switch (p.function) {
         case 0: return true_count == n;                             // AND
         case 1: return true_count > 0;                              // OR
         case 2: return (true_count % 2) == 1;                       // XOR
         case 3: return true_count < n;                               // NAND
         case 4: return true_count == 0;                              // NOR
         case 5: return true_count > n / 2;                           // MAJORITY (strict)
-        case 6: return true_count >= s->threshold;                   // THRESHOLD
+        case 6: return true_count >= p.threshold;                    // THRESHOLD
         default: return false;
     }
 }
@@ -137,10 +165,11 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                    SpcData* outputs, uint32_t output_count)
 {
     auto* s = state(inst);
+    const Params p = s->params.snapshot();  // one consistent view per frame
 
     // read inputs — non-blocking, so missing inputs keep their last value
-    const int32_t invert[4] = {s->invert_0, s->invert_1, s->invert_2, s->invert_3};
-    const int n = std::min(s->input_count, static_cast<int32_t>(input_count));
+    const int32_t invert[4] = {p.invert_0, p.invert_1, p.invert_2, p.invert_3};
+    const int n = std::min(p.input_count, static_cast<int32_t>(input_count));
 
     for (int i = 0; i < n; ++i) {
         if (inputs[i].type == SPC_DATA_SCALAR) {
@@ -157,7 +186,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     for (int i = 0; i < 4; ++i)
         vals[i] = invert[i] ? !s->last_values[i] : s->last_values[i];
 
-    bool result = evaluate(s, vals, s->input_count);
+    bool result = evaluate(p, vals, p.input_count);
 
     // edge detection
     bool rising = result && (!s->prev_result || !s->has_prev);
@@ -170,31 +199,31 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     }
 
     // emit control message based on edge mode
-    if (output_count >= 2 && s->cmd_param[0] != '\0') {
+    if (output_count >= 2 && p.cmd_param[0] != '\0') {
         bool should_emit = false;
         float cmd_value = 0.0f;
 
-        switch (s->edge_mode) {
+        switch (p.edge_mode) {
             case 0: // level — always emit current state
                 should_emit = true;
-                cmd_value = result ? s->cmd_true_value : s->cmd_false_value;
+                cmd_value = result ? p.cmd_true_value : p.cmd_false_value;
                 break;
             case 1: // rising edge
-                if (rising) { should_emit = true; cmd_value = s->cmd_true_value; }
+                if (rising) { should_emit = true; cmd_value = p.cmd_true_value; }
                 break;
             case 2: // falling edge
-                if (falling) { should_emit = true; cmd_value = s->cmd_false_value; }
+                if (falling) { should_emit = true; cmd_value = p.cmd_false_value; }
                 break;
             case 3: // both edges
-                if (rising) { should_emit = true; cmd_value = s->cmd_true_value; }
-                else if (falling) { should_emit = true; cmd_value = s->cmd_false_value; }
+                if (rising) { should_emit = true; cmd_value = p.cmd_true_value; }
+                else if (falling) { should_emit = true; cmd_value = p.cmd_false_value; }
                 break;
         }
 
         if (should_emit) {
             SpcControlMsg cmd{};
             spc::param_cmd_clear(&cmd);
-            spc::param_cmd_set_float(&cmd, s->cmd_param, cmd_value);
+            spc::param_cmd_set_float(&cmd, p.cmd_param, cmd_value);
             outputs[1].type = SPC_DATA_CONTROL_MSG;
             outputs[1].control_msg = &cmd;
         }

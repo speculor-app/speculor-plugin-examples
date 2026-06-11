@@ -12,7 +12,21 @@
 #include <gpu/gpu_failure_tracker.h>
 #endif
 
+#include <atomic>
 #include <memory>
+
+// GUI-thread-set parameters, snapshotted on the worker (H6). The WMV detector
+// is worker-owned: CPU process() applies the snapshot on a dirty flag and
+// record_gpu reads the snapshot directly.
+struct Params
+{
+    float threshold = 30.0f;
+    int32_t enable_weight = 1;
+    int32_t enable_threshold = 1;
+    float weight1 = 0.5f;
+    float weight2 = 0.3f;
+    float weight3 = 0.2f;
+};
 
 // internal state
 struct WmvBgsState
@@ -23,13 +37,9 @@ struct WmvBgsState
     cv::Mat fg_mask;
     SpcFrame output_frame;
 
-    // cached params
-    float threshold;
-    int32_t enable_weight;
-    int32_t enable_threshold;
-    float weight1;
-    float weight2;
-    float weight3;
+    // cross-thread parameter block (GUI writes, worker snapshots per frame)
+    spc::SharedParams<Params> params;
+    std::atomic<bool> params_dirty{false};
 
     // cached detection mask
     cv::Mat cached_mask;
@@ -79,15 +89,22 @@ SPC_PLUGIN_DESCRIPTOR(
 
 // --- lifecycle ---
 
+// apply a parameter snapshot to the worker-owned WMV detector (worker thread)
+static void apply_params(WmvBgsState* s, const Params& p)
+{
+    if (!s->wmv) return;
+    auto& wp = s->wmv->get_parameters();
+    wp.set_threshold(p.threshold);
+    wp.set_enable_weight(p.enable_weight != 0);
+    wp.set_enable_threshold(p.enable_threshold != 0);
+    wp.set_weights(0, p.weight1);
+    wp.set_weights(1, p.weight2);
+    wp.set_weights(2, p.weight3);
+}
+
 static SpcPluginInstance* create_instance()
 {
     auto* s = new WmvBgsState{};
-    s->threshold = 30.0f;
-    s->enable_weight = 1;
-    s->enable_threshold = 1;
-    s->weight1 = 0.5f;
-    s->weight2 = 0.3f;
-    s->weight3 = 0.2f;
     std::memset(&s->output_frame, 0, sizeof(SpcFrame));
     s->has_cached_mask = false;
     s->gpu_available = false;
@@ -118,40 +135,34 @@ static void destroy_instance(SpcPluginInstance* inst)
 static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcParameterDesc* value)
 {
     auto* s = state(inst);
-    if (!s->wmv) return -1;
-
-    if (spc::try_set_float(name, value, "threshold", s->threshold))
-        s->wmv->get_parameters().set_threshold(s->threshold);
-    else if (spc::try_set_bool(name, value, "enable_weight", s->enable_weight))
-        s->wmv->get_parameters().set_enable_weight(s->enable_weight != 0);
-    else if (spc::try_set_bool(name, value, "enable_threshold", s->enable_threshold))
-        s->wmv->get_parameters().set_enable_threshold(s->enable_threshold != 0);
-    else if (spc::try_set_float(name, value, "weight1", s->weight1))
-        s->wmv->get_parameters().set_weights(0, s->weight1);
-    else if (spc::try_set_float(name, value, "weight2", s->weight2))
-        s->wmv->get_parameters().set_weights(1, s->weight2);
-    else if (spc::try_set_float(name, value, "weight3", s->weight3))
-        s->wmv->get_parameters().set_weights(2, s->weight3);
-    else return -1;
-    return 0;
+    bool matched = s->params.update([&](Params& p) {
+        return spc::try_set_float(name, value, "threshold", p.threshold)
+            || spc::try_set_bool (name, value, "enable_weight", p.enable_weight)
+            || spc::try_set_bool (name, value, "enable_threshold", p.enable_threshold)
+            || spc::try_set_float(name, value, "weight1", p.weight1)
+            || spc::try_set_float(name, value, "weight2", p.weight2)
+            || spc::try_set_float(name, value, "weight3", p.weight3);
+    });
+    if (matched) s->params_dirty.store(true, std::memory_order_release);
+    return matched ? 0 : -1;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
 {
-    auto* s = state(inst);
-    if (spc::try_get_float(name, out, "threshold", s->threshold)) return 0;
-    if (spc::try_get_bool(name, out, "enable_weight", s->enable_weight)) return 0;
-    if (spc::try_get_bool(name, out, "enable_threshold", s->enable_threshold)) return 0;
-    if (spc::try_get_float(name, out, "weight1", s->weight1)) {
-        if (!s->enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
+    const Params p = state(inst)->params.snapshot();
+    if (spc::try_get_float(name, out, "threshold", p.threshold)) return 0;
+    if (spc::try_get_bool(name, out, "enable_weight", p.enable_weight)) return 0;
+    if (spc::try_get_bool(name, out, "enable_threshold", p.enable_threshold)) return 0;
+    if (spc::try_get_float(name, out, "weight1", p.weight1)) {
+        if (!p.enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
-    if (spc::try_get_float(name, out, "weight2", s->weight2)) {
-        if (!s->enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
+    if (spc::try_get_float(name, out, "weight2", p.weight2)) {
+        if (!p.enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
-    if (spc::try_get_float(name, out, "weight3", s->weight3)) {
-        if (!s->enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
+    if (spc::try_get_float(name, out, "weight3", p.weight3)) {
+        if (!p.enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
     return -1;
@@ -163,7 +174,11 @@ static int start(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     spc::install_spclib_log_bridge(&s->host.cached_log);
-    if (s->wmv) s->wmv->restart();
+    if (s->wmv) {
+        s->wmv->restart();
+        apply_params(s, s->params.snapshot());  // sync detector to current params
+        s->params_dirty.store(false, std::memory_order_release);
+    }
     s->cached_mask = cv::Mat();
     s->has_cached_mask = false;
 
@@ -219,6 +234,10 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     if (input_count < 1 || output_count < 2) return -1;
     if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return -1;
+
+    // apply any GUI-thread parameter change to the worker-owned detector
+    if (s->params_dirty.exchange(false, std::memory_order_acquire))
+        apply_params(s, s->params.snapshot());
 
     const SpcFrame* in_frame = inputs[0].frame;
     int cv_type = spc::cv_type_for_format(in_frame->format);
@@ -294,6 +313,8 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     if (rctx->inputs[0].type != SPC_DATA_FRAME || !rctx->inputs[0].frame) return -1;
     if (!s->gpu_available || !s->vk_ctx) return -1;
 
+    const Params p = s->params.snapshot();  // one consistent view per frame
+
     const SpcFrame* in_frame = rctx->inputs[0].frame;
     int cv_type = spc::cv_type_for_format(in_frame->format);
     if (cv_type < 0) return -1;
@@ -334,10 +355,10 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     pc.width = static_cast<int32_t>(w);
     pc.height = static_cast<int32_t>(h);
     pc.num_channels = num_channels;
-    pc.weight1 = s->enable_weight ? s->weight1 : (1.0f / 3.0f);
-    pc.weight2 = s->enable_weight ? s->weight2 : (1.0f / 3.0f);
-    pc.weight3 = s->enable_weight ? s->weight3 : (1.0f / 3.0f);
-    pc.threshold_sq = s->enable_threshold ? (s->threshold * s->threshold) : 0.0f;
+    pc.weight1 = p.enable_weight ? p.weight1 : (1.0f / 3.0f);
+    pc.weight2 = p.enable_weight ? p.weight2 : (1.0f / 3.0f);
+    pc.weight3 = p.enable_weight ? p.weight3 : (1.0f / 3.0f);
+    pc.threshold_sq = p.enable_threshold ? (p.threshold * p.threshold) : 0.0f;
     pc.has_mask = s->has_cached_mask ? 1 : 0;
 
     const uint8_t* mask_in_ptr = s->has_cached_mask ? s->cached_mask.data : nullptr;

@@ -11,15 +11,20 @@
 // input schema field indices
 enum { F_X = 0, F_Y, F_W, F_H, F_CONFIDENCE, IN_FIELD_COUNT };
 
-struct BboxDisplayState {
-    spc::HostServices host;
-
+// GUI-thread-set parameters, snapshotted on the worker (H6)
+struct Params {
     uint32_t color_rgba = spc::color_pack(0, 255, 0);
     int32_t thickness = 2;
     int32_t show_info = 1;
     int32_t resize_enable = 0;
     int32_t resize_width = 1920;
     int32_t resize_height = 1080;
+};
+
+struct BboxDisplayState {
+    spc::HostServices host;
+
+    spc::SharedParams<Params> params;
 
     std::vector<uint8_t> buffer;
     SpcFrame output_frame{};
@@ -77,30 +82,31 @@ SPC_PLUGIN_DESCRIPTOR(
 static int set_parameter(SpcPluginInstance* inst, const char* name,
                          const SpcParameterDesc* value)
 {
-    auto* s = state(inst);
-    if (spc::try_set_color(name, value, "color", s->color_rgba)) return 0;
-    if (spc::try_set_int(name, value, "thickness", s->thickness)) return 0;
-    if (spc::try_set_bool(name, value, "show_info", s->show_info)) return 0;
-    if (spc::try_set_bool(name, value, "resize_enable", s->resize_enable)) return 0;
-    if (spc::try_set_int(name, value, "resize_width", s->resize_width)) return 0;
-    if (spc::try_set_int(name, value, "resize_height", s->resize_height)) return 0;
-    return -1;
+    bool matched = state(inst)->params.update([&](Params& p) {
+        return spc::try_set_color(name, value, "color", p.color_rgba)
+            || spc::try_set_int  (name, value, "thickness", p.thickness)
+            || spc::try_set_bool (name, value, "show_info", p.show_info)
+            || spc::try_set_bool (name, value, "resize_enable", p.resize_enable)
+            || spc::try_set_int  (name, value, "resize_width", p.resize_width)
+            || spc::try_set_int  (name, value, "resize_height", p.resize_height);
+    });
+    return matched ? 0 : -1;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name,
                          SpcParameterDesc* out)
 {
-    auto* s = state(inst);
-    if (spc::try_get_color(name, out, "color", s->color_rgba)) return 0;
-    if (spc::try_get_int(name, out, "thickness", s->thickness)) return 0;
-    if (spc::try_get_bool(name, out, "show_info", s->show_info)) return 0;
-    if (spc::try_get_bool(name, out, "resize_enable", s->resize_enable)) return 0;
-    if (spc::try_get_int(name, out, "resize_width", s->resize_width)) {
-        if (!s->resize_enable) out->flags |= SPC_PARAM_FLAG_DISABLED;
+    const Params p = state(inst)->params.snapshot();
+    if (spc::try_get_color(name, out, "color", p.color_rgba)) return 0;
+    if (spc::try_get_int(name, out, "thickness", p.thickness)) return 0;
+    if (spc::try_get_bool(name, out, "show_info", p.show_info)) return 0;
+    if (spc::try_get_bool(name, out, "resize_enable", p.resize_enable)) return 0;
+    if (spc::try_get_int(name, out, "resize_width", p.resize_width)) {
+        if (!p.resize_enable) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
-    if (spc::try_get_int(name, out, "resize_height", s->resize_height)) {
-        if (!s->resize_enable) out->flags |= SPC_PARAM_FLAG_DISABLED;
+    if (spc::try_get_int(name, out, "resize_height", p.resize_height)) {
+        if (!p.resize_enable) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
     return -1;
@@ -189,6 +195,8 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
     int cv_type = spc::cv_type_for_format(in->format);
     if (cv_type < 0) return -1;
 
+    const Params p = s->params.snapshot();  // one consistent view per frame
+
     SpcFrame* out_frame = nullptr;
     cv::Mat dst = acquire_and_copy_frame(s, in, cv_type, &out_frame);
 
@@ -209,7 +217,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
         resolve_bbox_offsets(s, tbl);
 
         uint8_t cr, cg, cb, ca;
-        spc::color_unpack(s->color_rgba, cr, cg, cb, ca);
+        spc::color_unpack(p.color_rgba, cr, cg, cb, ca);
         const cv::Scalar color(cr, cg, cb); // RGB
         auto fw = static_cast<float>(in->width);
         auto fh = static_cast<float>(in->height);
@@ -226,9 +234,9 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
             int w = static_cast<int>(bw * fw);
             int h = static_cast<int>(bh * fh);
 
-            cv::rectangle(dst, cv::Rect(x, y, w, h), color, s->thickness);
+            cv::rectangle(dst, cv::Rect(x, y, w, h), color, p.thickness);
 
-            if (s->show_info) {
+            if (p.show_info) {
                 std::string label;
                 if (s->has_class_name) {
                     const char* cname = spc_table_get_string(tbl, i, s->in_off_class_name);
@@ -256,10 +264,10 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
     }
 
     // optionally letterbox into output resolution (preserves aspect ratio)
-    if (s->resize_enable)
+    if (p.resize_enable)
     {
-        int out_w = s->resize_width;
-        int out_h = s->resize_height;
+        int out_w = p.resize_width;
+        int out_h = p.resize_height;
         float scale = std::min(static_cast<float>(out_w) / dst.cols,
                                static_cast<float>(out_h) / dst.rows);
         int scaled_w = static_cast<int>(dst.cols * scale);
