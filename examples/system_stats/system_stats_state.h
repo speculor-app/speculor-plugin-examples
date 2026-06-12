@@ -32,6 +32,17 @@ enum {
     FIELD_COUNT
 };
 
+// GUI-thread-set parameters, snapshotted on the worker (H6)
+struct Params
+{
+    int32_t update_interval_sec = 1;
+#ifdef _WIN32
+    char disk_path[SPC_PARAM_STRING_MAX] = "C:\\";
+#else
+    char disk_path[SPC_PARAM_STRING_MAX] = "/";
+#endif
+};
+
 struct SystemStatsState
 {
     spc::HostServices host;
@@ -43,13 +54,8 @@ struct SystemStatsState
     SpcRecord output_record{};
     std::string record_json;
 
-    // parameters
-    int32_t update_interval_sec = 1;
-#ifdef _WIN32
-    char disk_path[SPC_PARAM_STRING_MAX] = "C:\\";
-#else
-    char disk_path[SPC_PARAM_STRING_MAX] = "/";
-#endif
+    // cross-thread parameter block (GUI writes, worker snapshots per frame)
+    spc::SharedParams<Params> params;
 
     // static info (read once in start())
     char cpu_name[128]{};

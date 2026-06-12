@@ -6,12 +6,27 @@
 
 #include <opencv2/core.hpp>
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
 // output schema field indices
 enum { F_X = 0, F_Y, F_W, F_H, F_CONFIDENCE, F_AREA, F_MEAN_INTENSITY,
        F_CENTROID_X, F_CENTROID_Y, F_SOLIDITY, F_ASPECT_RATIO, FIELD_COUNT };
+
+// GUI-thread-set parameters, snapshotted on the worker (H6). The detector is
+// worker-owned (its setters write fields detect() reads), so set_parameter
+// only mutates this block and the worker applies the snapshot on a dirty flag.
+struct Params
+{
+    int32_t size_threshold = 5;
+    int32_t area_threshold = 25;
+    int32_t min_distance = 25;
+    int32_t max_blobs = 100;
+    int32_t enable_join = 1;
+    int32_t connectivity = 1; // 0=Four, 1=Eight
+    float bbox_padding = 0.0f; // symmetric expansion of output bbox, fraction of bbox size
+};
 
 // internal state
 struct BlobDetectState
@@ -24,14 +39,9 @@ struct BlobDetectState
     uint32_t offsets[FIELD_COUNT];
     uint32_t stride;
 
-    // cached params
-    int32_t size_threshold;
-    int32_t area_threshold;
-    int32_t min_distance;
-    int32_t max_blobs;
-    int32_t enable_join;
-    int32_t connectivity; // 0=Four, 1=Eight
-    float bbox_padding;   // symmetric expansion of output bbox, fraction of bbox size
+    // cross-thread parameter block (GUI writes, worker snapshots per frame)
+    spc::SharedParams<Params> params;
+    std::atomic<bool> params_dirty{false};
 };
 
 SPC_PLUGIN_CAST(BlobDetectState)
@@ -76,36 +86,43 @@ SPC_PLUGIN_DESCRIPTOR(
 
 // --- lifecycle ---
 
-static spclib::blobs::ConnectedBlobDetectionParams build_params(const BlobDetectState* s)
+static spclib::blobs::ConnectedBlobDetectionParams build_params(const Params& sp)
 {
     spclib::blobs::ConnectedBlobDetectionParams p;
-    p.set_size_threshold(s->size_threshold);
-    p.set_area_threshold(s->area_threshold);
-    p.set_min_distance(s->min_distance);
-    p.set_max_blobs(s->max_blobs);
-    p.enable_join = s->enable_join != 0;
-    p.connectivity = s->connectivity == 0
+    p.set_size_threshold(sp.size_threshold);
+    p.set_area_threshold(sp.area_threshold);
+    p.set_min_distance(sp.min_distance);
+    p.set_max_blobs(sp.max_blobs);
+    p.enable_join = sp.enable_join != 0;
+    p.connectivity = sp.connectivity == 0
         ? spclib::blobs::Connectivity::Four
         : spclib::blobs::Connectivity::Eight;
     return p;
 }
 
+// apply a parameter snapshot to the live detector. Worker thread only.
+static void apply_params(BlobDetectState* s, const Params& sp)
+{
+    s->detector->set_size_threshold(sp.size_threshold);
+    s->detector->set_area_threshold(sp.area_threshold);
+    s->detector->set_min_distance(sp.min_distance);
+    s->detector->set_max_blobs(sp.max_blobs);
+    s->detector->set_enable_join(sp.enable_join != 0);
+    s->detector->set_connectivity(sp.connectivity == 0
+        ? spclib::blobs::Connectivity::Four
+        : spclib::blobs::Connectivity::Eight);
+}
+
 static SpcPluginInstance* create_instance()
 {
     auto* s = new BlobDetectState{};
-    s->size_threshold = 5;
-    s->area_threshold = 25;
-    s->min_distance = 25;
-    s->max_blobs = 100;
-    s->enable_join = 1;
-    s->connectivity = 1;
-    s->bbox_padding = 0.0f;
 
     auto* desc = get_descriptor();
     spc_schema_compute_offsets(&desc->ports[2].schema, s->offsets, &s->stride);
     spc_table_init(&s->output_table, s->stride, &desc->ports[2].schema);
 
-    s->detector = std::make_unique<spclib::blobs::ConnectedBlobDetection>(build_params(s));
+    s->detector = std::make_unique<spclib::blobs::ConnectedBlobDetection>(
+        build_params(s->params.snapshot()));
 
     return reinterpret_cast<SpcPluginInstance*>(s);
 }
@@ -123,57 +140,34 @@ static void destroy_instance(SpcPluginInstance* inst)
 static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcParameterDesc* value)
 {
     auto* s = state(inst);
-    if (!s->detector) return -1;
-
-    if (spc::try_set_int(name, value, "size_threshold", s->size_threshold))
-    {
-        s->detector->set_size_threshold(s->size_threshold);
-    }
-    else if (spc::try_set_int(name, value, "area_threshold", s->area_threshold))
-    {
-        s->detector->set_area_threshold(s->area_threshold);
-    }
-    else if (spc::try_set_int(name, value, "min_distance", s->min_distance))
-    {
-        s->detector->set_min_distance(s->min_distance);
-    }
-    else if (spc::try_set_int(name, value, "max_blobs", s->max_blobs))
-    {
-        s->detector->set_max_blobs(s->max_blobs);
-    }
-    else if (spc::try_set_bool(name, value, "enable_join", s->enable_join))
-    {
-        s->detector->set_enable_join(s->enable_join != 0);
-    }
-    else if (spc::try_set_enum(name, value, "connectivity", s->connectivity))
-    {
-        s->detector->set_connectivity(s->connectivity == 0
-            ? spclib::blobs::Connectivity::Four
-            : spclib::blobs::Connectivity::Eight);
-    }
-    else if (spc::try_set_float(name, value, "bbox_padding", s->bbox_padding))
-    {
-    }
-    else
-    {
-        return -1;
-    }
-    return 0;
+    // Mutate the shared block only; the worker applies it to the detector on
+    // the dirty flag (detector setters must not run concurrently with detect()).
+    bool matched = s->params.update([&](Params& p) {
+        return spc::try_set_int  (name, value, "size_threshold", p.size_threshold)
+            || spc::try_set_int  (name, value, "area_threshold", p.area_threshold)
+            || spc::try_set_int  (name, value, "min_distance", p.min_distance)
+            || spc::try_set_int  (name, value, "max_blobs", p.max_blobs)
+            || spc::try_set_bool (name, value, "enable_join", p.enable_join)
+            || spc::try_set_enum (name, value, "connectivity", p.connectivity)
+            || spc::try_set_float(name, value, "bbox_padding", p.bbox_padding);
+    });
+    if (matched) s->params_dirty.store(true, std::memory_order_release);
+    return matched ? 0 : -1;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
 {
-    auto* s = state(inst);
-    if (spc::try_get_int(name, out, "size_threshold", s->size_threshold)) return 0;
-    if (spc::try_get_int(name, out, "area_threshold", s->area_threshold)) return 0;
-    if (spc::try_get_int(name, out, "min_distance", s->min_distance)) {
-        if (!s->enable_join) out->flags |= SPC_PARAM_FLAG_DISABLED;
+    const Params p = state(inst)->params.snapshot();
+    if (spc::try_get_int(name, out, "size_threshold", p.size_threshold)) return 0;
+    if (spc::try_get_int(name, out, "area_threshold", p.area_threshold)) return 0;
+    if (spc::try_get_int(name, out, "min_distance", p.min_distance)) {
+        if (!p.enable_join) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
-    if (spc::try_get_int(name, out, "max_blobs", s->max_blobs)) return 0;
-    if (spc::try_get_bool(name, out, "enable_join", s->enable_join)) return 0;
-    if (spc::try_get_enum(name, out, "connectivity", s->connectivity)) return 0;
-    if (spc::try_get_float(name, out, "bbox_padding", s->bbox_padding)) return 0;
+    if (spc::try_get_int(name, out, "max_blobs", p.max_blobs)) return 0;
+    if (spc::try_get_bool(name, out, "enable_join", p.enable_join)) return 0;
+    if (spc::try_get_enum(name, out, "connectivity", p.connectivity)) return 0;
+    if (spc::try_get_float(name, out, "bbox_padding", p.bbox_padding)) return 0;
     return -1;
 }
 
@@ -184,7 +178,9 @@ static int start(SpcPluginInstance* inst)
     auto* s = state(inst);
     spc::install_spclib_log_bridge(&s->host.cached_log);
     // recreate detector with current params on start
-    s->detector = std::make_unique<spclib::blobs::ConnectedBlobDetection>(build_params(s));
+    s->detector = std::make_unique<spclib::blobs::ConnectedBlobDetection>(
+        build_params(s->params.snapshot()));
+    s->params_dirty.store(false, std::memory_order_release);
     SPC_LOG_INFO(&s->host.cached_log, "Blob Detect started");
     return 0;
 }
@@ -215,6 +211,11 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     SpcFrame* in_frame = const_cast<SpcFrame*>(inputs[0].frame);
     if (in_frame->format != SPC_PIXEL_FORMAT_GRAY8) return -1;
+
+    // apply any GUI-thread parameter change to the worker-owned detector
+    const Params p = s->params.snapshot();
+    if (s->params_dirty.exchange(false, std::memory_order_acquire))
+        apply_params(s, p);
 
     // ensure CPU data is available (GPU-resident frames need lazy download)
     if ((in_frame->gpu_flags & SPC_GPU_FLAG_RESIDENT) &&
@@ -255,8 +256,8 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
         // Symmetric padding in pixel space, clamped to frame bounds.
         // mean_intensity below still uses the original `r` so it reflects
         // the moving region, not the padded margin.
-        const float pad_x = static_cast<float>(r.width)  * s->bbox_padding;
-        const float pad_y = static_cast<float>(r.height) * s->bbox_padding;
+        const float pad_x = static_cast<float>(r.width)  * p.bbox_padding;
+        const float pad_y = static_cast<float>(r.height) * p.bbox_padding;
         const float px0 = std::max(0.0f, static_cast<float>(r.x) - pad_x);
         const float py0 = std::max(0.0f, static_cast<float>(r.y) - pad_y);
         const float px1 = std::min(fw,   static_cast<float>(r.x + r.width)  + pad_x);

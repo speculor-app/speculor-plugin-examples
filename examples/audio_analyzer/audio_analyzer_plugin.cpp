@@ -29,6 +29,14 @@ constexpr size_t ring_capacity = 65536;
 // state
 // ═══════════════════════════════════════════════════════════════════
 
+// GUI-thread-set parameters, snapshotted on the worker (H6)
+struct Params
+{
+    int32_t window_size = 4096;
+    int32_t sample_rate = 44100;
+    float update_rate = 10.0f;
+};
+
 struct AudioAnalyzerState
 {
     spc::HostServices host;
@@ -46,10 +54,8 @@ struct AudioAnalyzerState
     // Hann window (precomputed)
     std::vector<float> hann;
 
-    // parameters
-    int32_t window_size = 4096;
-    int32_t sample_rate = 44100;
-    float update_rate = 10.0f;
+    // cross-thread parameter block (GUI writes, worker snapshots per frame)
+    spc::SharedParams<Params> params;
 
     // upstream metadata
     double upstream_sample_rate = 0.0;
@@ -159,11 +165,26 @@ static void destroy_instance(SpcPluginInstance* inst)
 // parameters
 // ═══════════════════════════════════════════════════════════════════
 
-SPC_PLUGIN_AUTO_PARAMS(AudioAnalyzerState,
-    SPC_BIND_INT(AudioAnalyzerState, "window_size", window_size),
-    SPC_BIND_INT(AudioAnalyzerState, "sample_rate", sample_rate),
-    SPC_BIND_FLOAT(AudioAnalyzerState, "update_rate", update_rate),
-)
+static int set_parameter(SpcPluginInstance* inst, const char* name,
+                         const SpcParameterDesc* value)
+{
+    bool matched = state(inst)->params.update([&](Params& p) {
+        return spc::try_set_int  (name, value, "window_size", p.window_size)
+            || spc::try_set_int  (name, value, "sample_rate", p.sample_rate)
+            || spc::try_set_float(name, value, "update_rate", p.update_rate);
+    });
+    return matched ? 0 : -1;
+}
+
+static int get_parameter(SpcPluginInstance* inst, const char* name,
+                         SpcParameterDesc* out)
+{
+    const Params p = state(inst)->params.snapshot();
+    if (spc::try_get_int  (name, out, "window_size", p.window_size)) return 0;
+    if (spc::try_get_int  (name, out, "sample_rate", p.sample_rate)) return 0;
+    if (spc::try_get_float(name, out, "update_rate", p.update_rate)) return 0;
+    return -1;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // streaming
@@ -172,17 +193,18 @@ SPC_PLUGIN_AUTO_PARAMS(AudioAnalyzerState,
 static int start(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
+    const Params p = s->params.snapshot();
     spc_ring_reset(s->signal_ring);
     s->window_pos = 0;
     s->frame_number = 0;
     s->upstream_sample_rate = 0.0;
     s->last_output_time = std::chrono::steady_clock::now();
 
-    auto ws = static_cast<size_t>(std::clamp(s->window_size, 256, 16384));
+    auto ws = static_cast<size_t>(std::clamp(p.window_size, 256, 16384));
     s->window_buf.assign(ws, 0.0f);
     precompute_hann(s, ws);
 
-    SPC_LOG_INFO(&s->host.cached_log, "Audio Analyzer started (window=%d)", s->window_size);
+    SPC_LOG_INFO(&s->host.cached_log, "Audio Analyzer started (window=%d)", p.window_size);
     return 0;
 }
 
@@ -204,9 +226,11 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     auto* s = state(inst);
     if (output_count < 1) return -1;
 
+    const Params p = s->params.snapshot();  // one consistent view per frame
+
     // rate limiting
     auto now = std::chrono::steady_clock::now();
-    float rate = std::clamp(s->update_rate, 1.0f, 60.0f);
+    float rate = std::clamp(p.update_rate, 1.0f, 60.0f);
     auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(1.0 / static_cast<double>(rate)));
     if (now < s->last_output_time + interval) {
@@ -234,7 +258,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     }
 
     double sr = (s->upstream_sample_rate > 0.0) ? s->upstream_sample_rate
-                                                : static_cast<double>(s->sample_rate);
+                                                : static_cast<double>(p.sample_rate);
 
     // reorder window buffer so newest sample is last
     std::vector<float> samples(ws);
