@@ -326,7 +326,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
 
     s->output_table.sample_rate_hz = sr;
     s->output_table.frame_number = s->frame_number++;
-    s->output_table.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+    s->output_table.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now - s->last_output_time).count();
 
     s->last_output_time = now;

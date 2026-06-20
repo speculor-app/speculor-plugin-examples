@@ -169,7 +169,7 @@ static void set_frame_output(BboxDisplayState* s, const SpcFrame* in,
                              SpcFrame* pool_frame, SpcData* output)
 {
     if (pool_frame) {
-        pool_frame->timestamp_us = in->timestamp_us;
+        pool_frame->timestamp_ns = in->timestamp_ns;
         pool_frame->frame_number = in->frame_number;
         output->type = SPC_DATA_FRAME;
         output->frame = pool_frame;

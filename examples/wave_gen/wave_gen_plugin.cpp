@@ -217,8 +217,8 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
 
     // timestamp from cumulative sample position
     s->output_table.frame_number = s->sample_count / min_batch;
-    s->output_table.timestamp_us = static_cast<int64_t>(
-        static_cast<double>(s->sample_count) / static_cast<double>(p.sample_rate) * 1e6);
+    s->output_table.timestamp_ns = static_cast<int64_t>(
+        static_cast<double>(s->sample_count) / static_cast<double>(p.sample_rate) * 1e9);
 
     s->sample_count += to_generate;
 

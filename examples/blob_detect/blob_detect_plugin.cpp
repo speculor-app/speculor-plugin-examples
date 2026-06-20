@@ -318,7 +318,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     }
 
     s->output_table.frame_number = in_frame->frame_number;
-    s->output_table.timestamp_us = in_frame->timestamp_us;
+    s->output_table.timestamp_ns = in_frame->timestamp_ns;
 
     outputs[0].type = SPC_DATA_TABLE;
     outputs[0].table = &s->output_table;

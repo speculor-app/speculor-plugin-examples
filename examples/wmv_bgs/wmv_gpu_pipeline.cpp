@@ -59,8 +59,8 @@ bool WmvGpuPipeline::prepare(VulkanContext &ctx, uint32_t width, uint32_t height
 
     wait_timeline_idle(ctx);
 
-    staging_in_.destroy(ctx);
-    staging_out_.destroy(ctx);
+    // output buffer (bufs_[4]) + its staging are engine-owned ring slots now.
+    staging_mask_.destroy(ctx);
     for (int i = 0; i < NUM_BUFFERS; ++i) spc::gpu::destroy_buffer(ctx, bufs_[i], mems_[i]);
     spc::gpu::destroy_buffer(ctx, packed_mask_buf_, packed_mask_mem_);
 
@@ -92,229 +92,63 @@ bool WmvGpuPipeline::prepare(VulkanContext &ctx, uint32_t width, uint32_t height
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, bufs_[3], mems_[3]))
     { width_ = 0; return false; }
-    // output mask buffer
-    if (!spc::gpu::create_buffer(ctx, mask_bytes_,
-                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, bufs_[4], mems_[4]))
-    { width_ = 0; return false; }
-    // packed GRAY8 output buffer (binding 5) — for GPU-resident mask output
+    // output mask buffer (bufs_[4]) is an engine output ring slot — not here.
+    // packed GRAY8 output buffer (binding 5) — bound for descriptor validity.
     if (!spc::gpu::create_buffer(ctx, mask_byte_size_,
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, packed_mask_buf_, packed_mask_mem_))
     { width_ = 0; return false; }
 
-    // staging in: frame + mask
-    VkDeviceSize staging_in_size = frame_bytes_ + mask_in_bytes;
-    if (!staging_in_.allocate(ctx, staging_in_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+    // staging for the optional detect mask (binding 3 upload source). The input
+    // frame upload staging + output download staging are engine-owned ring
+    // slots resolved per frame.
+    if (!staging_mask_.allocate(ctx, mask_in_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
     { width_ = 0; return false; }
-
-    // staging out: packed mask
-    if (!staging_out_.allocate(ctx, mask_bytes_, VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-    { width_ = 0; return false; }
-
-    return true;
-}
-
-bool WmvGpuPipeline::push_and_run(VulkanContext &ctx,
-                                   const uint8_t *frame, int frame_stride,
-                                   const uint8_t *mask_in, int mask_stride,
-                                   uint8_t *out_mask,
-                                   const WmvPushConstants &params,
-                                   VkBuffer gpu_input,
-                                   bool skip_download)
-{
-    if (!ctx.valid || !ctx.device || !frame || !staging_in_.mapped) return false;
-
-    auto t = begin_timing();
-
-    // advance rolling buffer
-    int target = rolling_idx_ % 3;
-    rolling_idx_ = (rolling_idx_ + 1) % 3;
-    ++frame_count_;
-
-    // upload frame data: skip CPU staging if GPU-resident input
-    if (gpu_input == VK_NULL_HANDLE) {
-        auto *staging = static_cast<uint8_t *>(staging_in_.mapped);
-        const int row_bytes = static_cast<int>(width_) * num_channels_;
-        if (frame_stride == row_bytes)
-            std::memcpy(staging, frame, static_cast<size_t>(row_bytes) * height_);
-        else
-            for (uint32_t y = 0; y < height_; ++y)
-                std::memcpy(staging + y * row_bytes, frame + y * frame_stride, row_bytes);
-    }
-
-    // copy mask to staging if present
-    if (mask_in)
-    {
-        auto *staging = static_cast<uint8_t *>(staging_in_.mapped);
-        auto *mask_staging = staging + frame_bytes_;
-        if (mask_stride == static_cast<int>(width_))
-            std::memcpy(mask_staging, mask_in, static_cast<size_t>(width_) * height_);
-        else
-            for (uint32_t y = 0; y < height_; ++y)
-                std::memcpy(mask_staging + y * width_, mask_in + y * mask_stride, width_);
-    }
-
-    t.mark_upload();
-
-    // not enough frames yet — just upload, don't compute
-    if (frame_count_ < 3)
-    {
-        if (!begin_recording(ctx)) return false;
-        cmd_upload_input(staging_in_, bufs_[target], frame_bytes_, gpu_input);
-        if (!submit_and_wait(ctx)) return false;
-        return false;
-    }
-
-    // single command buffer: upload frame + upload mask + compute + download
-    // rolling order: newest=target, middle=(target-1+3)%3, oldest=(target-2+3)%3
-    int f0 = target;             // newest (just uploaded)
-    int f1 = (target + 2) % 3;  // middle
-    int f2 = (target + 1) % 3;  // oldest
-
-    constexpr int TOTAL_BINDINGS = NUM_BUFFERS + 1;  // +1 for packed_mask
-    VkDeviceSize sizes[] = { frame_bytes_, frame_bytes_, frame_bytes_,
-                             ((static_cast<VkDeviceSize>(width_) * height_ + 3) / 4) * 4,
-                             mask_bytes_, mask_byte_size_ };
-    int buf_map[] = { f0, f1, f2, 3, 4, -1 };
-
-    // populate push descriptor cache (updated each frame due to rolling buffers)
-    for (int i = 0; i < TOTAL_BINDINGS; ++i)
-    {
-        push_bufs_[i] = (buf_map[i] >= 0) ? bufs_[buf_map[i]] : packed_mask_buf_;
-        push_sizes_[i] = sizes[i];
-    }
-
-    if (!ctx.has_push_descriptors)
-    {
-        VkDescriptorBufferInfo buf_infos[TOTAL_BINDINGS]{};
-        VkWriteDescriptorSet desc_writes[TOTAL_BINDINGS]{};
-        for (int i = 0; i < TOTAL_BINDINGS; ++i)
-        {
-            buf_infos[i].buffer = push_bufs_[i];
-            buf_infos[i].range = sizes[i];
-            desc_writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            desc_writes[i].dstSet = desc_set_;
-            desc_writes[i].dstBinding = static_cast<uint32_t>(i);
-            desc_writes[i].descriptorCount = 1;
-            desc_writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            desc_writes[i].pBufferInfo = &buf_infos[i];
-        }
-        vkUpdateDescriptorSets(ctx.device, TOTAL_BINDINGS, desc_writes, 0, nullptr);
-    }
-
-    uint32_t width4 = (width_ + 3) / 4;
-    uint32_t groups_x = (width4 + 15) / 16;
-    uint32_t groups_y = (height_ + 15) / 16;
-
-    WmvPushConstants pc = params;
-    pc.width4 = static_cast<int32_t>(width4);
-
-    if (!begin_recording(ctx)) return false;
-
-    // upload frame: device-to-device or staging-to-device
-    cmd_upload_input(staging_in_, bufs_[target], frame_bytes_, gpu_input);
-
-    // upload mask if present (raw vkCmdCopyBuffer — uses srcOffset into staging)
-    if (mask_in)
-    {
-        VkBufferCopy mask_copy{};
-        mask_copy.srcOffset = frame_bytes_;
-        mask_copy.size = ((static_cast<VkDeviceSize>(width_) * height_ + 3) / 4) * 4;
-        vkCmdCopyBuffer(cmd_buf_, staging_in_.buffer, bufs_[3], 1, &mask_copy);
-    }
-
-    // barrier: transfer -> compute
-    barrier_transfer_to_compute();
-
-    // dispatch main compute
-    cmd_dispatch_compute(ctx, compute_pipeline_, compute_shader_,
-                         pipeline_layout_, desc_set_,
-                         push_bufs_, push_sizes_, NUM_BUFFERS + 1,
-                         pc, groups_x, groups_y);
-
-    // for wide layout: dispatch packing shader (uint32 per pixel -> packed GRAY8)
-    if (use_wide_layout_)
-    {
-        barrier_compute_to_compute();
-
-        uint32_t pack_words = (pixel_count_ + 3) / 4;
-        uint32_t pack_groups = (pack_words + 255) / 256;
-        cmd_dispatch_compute(ctx, pack_mask_pipeline_, pack_mask_shader_,
-                             pipeline_layout_, desc_set_,
-                             push_bufs_, push_sizes_, NUM_BUFFERS + 1,
-                             pc, pack_groups, 1);
-    }
-
-    // download result
-    barrier_compute_to_transfer();
-    cmd_download_to_staging(use_wide_layout_ ? packed_mask_buf_ : bufs_[4],
-                            staging_out_,
-                            use_wide_layout_ ? mask_byte_size_ : mask_bytes_);
-
-    // single submit for upload + compute + download
-    if (!submit_and_wait(ctx)) return false;
-
-    t.mark_gpu();
-
-    // invalidate CPU cache (needed even for skip_download — staging may be read later via registry)
-    staging_out_.invalidate(ctx);
-
-    // CPU readback: skip if GPU-resident output (staging pre-populated for lazy readback)
-    if (!skip_download && out_mask) {
-        auto *pp = static_cast<const uint8_t *>(staging_out_.mapped);
-        uint32_t packed_row = width4 * 4;
-        for (uint32_t y = 0; y < height_; ++y)
-            std::memcpy(out_mask + y * width_, pp + y * packed_row, width_);
-    }
-
-    timing_ = t.finish();
 
     return true;
 }
 
 bool WmvGpuPipeline::record(VulkanContext &ctx, VkCommandBuffer cmd,
-                             const uint8_t *frame, int frame_stride,
+                             VkBuffer in_staging,
+                             VkBuffer out_device, VkBuffer out_staging,
                              const uint8_t *mask_in, int mask_stride,
                              const WmvPushConstants &params,
                              VkBuffer gpu_input)
 {
-    if (!ctx.valid || !ctx.device || !frame || !staging_in_.mapped) return false;
+    if (!ctx.valid || !ctx.device) return false;
+    // CPU-fed input needs a valid upload ring staging; GPU-resident input is
+    // copied device-to-device from gpu_input instead.
+    if (gpu_input == VK_NULL_HANDLE && in_staging == VK_NULL_HANDLE) return false;
 
-    // advance rolling buffer (matches push_and_run)
+    // advance rolling buffer (the 3 rolling frame buffers are cross-frame STATE
+    // and stay plugin-owned; only the upload staging + output are ring slots).
     int target = rolling_idx_ % 3;
     rolling_idx_ = (rolling_idx_ + 1) % 3;
     ++frame_count_;
 
-    // upload frame: skip CPU staging if GPU-resident input
-    if (gpu_input == VK_NULL_HANDLE)
-    {
-        auto *staging = static_cast<uint8_t *>(staging_in_.mapped);
-        const int row_bytes = static_cast<int>(width_) * num_channels_;
-        if (frame_stride == row_bytes)
-            std::memcpy(staging, frame, static_cast<size_t>(row_bytes) * height_);
-        else
-            for (uint32_t y = 0; y < height_; ++y)
-                std::memcpy(staging + y * row_bytes, frame + y * frame_stride, row_bytes);
-    }
+    // Frame upload source: the engine upload ring slot's staging (the plugin
+    // already memcpy'd the CPU frame in). The copy lands in the rolling STATE
+    // buffer bufs_[target]. cmd_upload_input(gpu_input) does device-to-device
+    // when gpu_input != NULL (staging ignored).
+    StagingBuffer in_stg{}; in_stg.buffer = in_staging;
 
-    // Warmup (frame_count_ < 3): record the upload-only branch into the
-    // engine secondary so the read of gpu_input is properly ordered after
-    // upstream writes via the engine's inter-member barrier. Skip the
-    // compute dispatch — the rolling buffer doesn't yet have 2 prior
-    // frames to read from.
+    // Warmup (frame_count_ < 3): record the upload-only branch into the engine
+    // secondary so the read of gpu_input is properly ordered after upstream
+    // writes via the engine's inter-member barrier. Skip the compute dispatch —
+    // the rolling buffer doesn't yet have 2 prior frames to read from.
     if (frame_count_ < 3)
     {
         ScopedExternalRecording scope(*this, cmd);
-        cmd_upload_input(staging_in_, bufs_[target], frame_bytes_, gpu_input);
+        cmd_upload_input(in_stg, bufs_[target], frame_bytes_, gpu_input);
         return true;
     }
 
-    // copy mask to staging if present
+    if (out_device == VK_NULL_HANDLE || out_staging == VK_NULL_HANDLE) return false;
+
+    // copy mask to the plugin's own staging if present
     if (mask_in)
     {
-        auto *staging = static_cast<uint8_t *>(staging_in_.mapped);
-        auto *mask_staging = staging + frame_bytes_;
+        auto *mask_staging = static_cast<uint8_t *>(staging_mask_.mapped);
         if (mask_stride == static_cast<int>(width_))
             std::memcpy(mask_staging, mask_in, static_cast<size_t>(width_) * height_);
         else
@@ -322,17 +156,21 @@ bool WmvGpuPipeline::record(VulkanContext &ctx, VkCommandBuffer cmd,
                 std::memcpy(mask_staging + y * width_, mask_in + y * mask_stride, width_);
     }
 
+    // rolling order: newest=target, middle=(target+2)%3, oldest=(target+1)%3.
+    // Binding 4 (output) is the engine output ring slot; binding 5 (packed) is
+    // the stable plugin buffer (descriptor validity only). The cache is rebuilt
+    // every frame because bindings 0..2 rotate among the rolling buffers.
     int f0 = target;
     int f1 = (target + 2) % 3;
     int f2 = (target + 1) % 3;
     constexpr int TOTAL_BINDINGS = NUM_BUFFERS + 1;
+    VkBuffer bufs6[] = { bufs_[f0], bufs_[f1], bufs_[f2], bufs_[3], out_device, packed_mask_buf_ };
     VkDeviceSize sizes[] = { frame_bytes_, frame_bytes_, frame_bytes_,
                              ((static_cast<VkDeviceSize>(width_) * height_ + 3) / 4) * 4,
                              mask_bytes_, mask_byte_size_ };
-    int buf_map[] = { f0, f1, f2, 3, 4, -1 };
     for (int i = 0; i < TOTAL_BINDINGS; ++i)
     {
-        push_bufs_[i]  = (buf_map[i] >= 0) ? bufs_[buf_map[i]] : packed_mask_buf_;
+        push_bufs_[i]  = bufs6[i];
         push_sizes_[i] = sizes[i];
     }
     if (!ctx.has_push_descriptors)
@@ -341,7 +179,7 @@ bool WmvGpuPipeline::record(VulkanContext &ctx, VkCommandBuffer cmd,
         VkWriteDescriptorSet  desc_writes[TOTAL_BINDINGS]{};
         for (int i = 0; i < TOTAL_BINDINGS; ++i)
         {
-            buf_infos[i].buffer = push_bufs_[i];
+            buf_infos[i].buffer = bufs6[i];
             buf_infos[i].range  = sizes[i];
             desc_writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             desc_writes[i].dstSet = desc_set_;
@@ -361,14 +199,9 @@ bool WmvGpuPipeline::record(VulkanContext &ctx, VkCommandBuffer cmd,
 
     ScopedExternalRecording scope(*this, cmd);
 
-    cmd_upload_input(staging_in_, bufs_[target], frame_bytes_, gpu_input);
+    cmd_upload_input(in_stg, bufs_[target], frame_bytes_, gpu_input);
     if (mask_in)
-    {
-        VkBufferCopy mask_copy{};
-        mask_copy.srcOffset = frame_bytes_;
-        mask_copy.size = ((static_cast<VkDeviceSize>(width_) * height_ + 3) / 4) * 4;
-        vkCmdCopyBuffer(cmd, staging_in_.buffer, bufs_[3], 1, &mask_copy);
-    }
+        cmd_upload_input(staging_mask_, bufs_[3], ((static_cast<VkDeviceSize>(width_) * height_ + 3) / 4) * 4);
     barrier_transfer_to_compute();
     cmd_dispatch_compute(ctx, compute_pipeline_, compute_shader_,
                          pipeline_layout_, desc_set_,
@@ -384,9 +217,13 @@ bool WmvGpuPipeline::record(VulkanContext &ctx, VkCommandBuffer cmd,
                              push_bufs_, push_sizes_, NUM_BUFFERS + 1,
                              pc, pack_groups, 1);
     }
+    // Download to the OUTPUT ring slot's staging — engine handles the wait +
+    // invalidate via the registry. Non-wide (active) path downloads the compute
+    // shader's direct output (out_device).
     barrier_compute_to_transfer();
-    cmd_download_to_staging(use_wide_layout_ ? packed_mask_buf_ : bufs_[4],
-                            staging_out_,
+    StagingBuffer out_stg{}; out_stg.buffer = out_staging;
+    cmd_download_to_staging(use_wide_layout_ ? packed_mask_buf_ : out_device,
+                            out_stg,
                             use_wide_layout_ ? mask_byte_size_ : mask_bytes_);
     return true;
 }
@@ -395,8 +232,8 @@ void WmvGpuPipeline::destroy(VulkanContext &ctx)
 {
     if (!ctx.device) return;
 
-    staging_in_.destroy(ctx);
-    staging_out_.destroy(ctx);
+    // output buffer (bufs_[4]) + its staging are engine-owned ring slots now.
+    staging_mask_.destroy(ctx);
     for (int i = 0; i < NUM_BUFFERS; ++i) spc::gpu::destroy_buffer(ctx, bufs_[i], mems_[i]);
     spc::gpu::destroy_buffer(ctx, packed_mask_buf_, packed_mask_mem_);
 
