@@ -189,7 +189,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     spc_table_set_uint32(&s->output_table, 0, s->offsets[F_CPU_FREQ_MHZ],     s->cpu_freq_mhz);
 
     s->output_table.frame_number = s->frame_number++;
-    s->output_table.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+    s->output_table.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
 
     outputs[0].type = SPC_DATA_TABLE;

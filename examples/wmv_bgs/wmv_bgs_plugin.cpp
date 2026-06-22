@@ -51,7 +51,6 @@ struct WmvBgsState
     std::shared_ptr<spc::gpu::VulkanContext> vk_ctx;
     spc::gpu::WmvGpuPipeline vk_pipeline;
     uint64_t gpu_frame_count;
-    spc::gpu::GpuOutputHandle gpu_output;
     spc::gpu::GpuFailureTracker gpu_failure{"WMV"};
 #endif
     bool gpu_available;
@@ -121,7 +120,6 @@ static void destroy_instance(SpcPluginInstance* inst)
 #ifdef SPC_HAS_VULKAN
     if (s->vk_ctx)
     {
-        s->gpu_output.release(s->vk_ctx.get());
         s->vk_pipeline.destroy(*s->vk_ctx);
         s->vk_ctx.reset();
     }
@@ -208,7 +206,6 @@ static int stop(SpcPluginInstance* inst)
 #ifdef SPC_HAS_VULKAN
     if (s->vk_ctx)
     {
-        s->gpu_output.release(s->vk_ctx.get());
         s->vk_pipeline.destroy(*s->vk_ctx);
         s->vk_ctx.reset();
     }
@@ -274,7 +271,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
         s->wmv->apply(s->input_image, s->fg_mask,
                       s->has_cached_mask ? s->cached_mask : s->empty_mask);
         out->frame_number = in_frame->frame_number;
-        out->timestamp_us = in_frame->timestamp_us;
+        out->timestamp_ns = in_frame->timestamp_ns;
         outputs[0].type = SPC_DATA_FRAME;
         outputs[0].frame = out;
     }
@@ -284,7 +281,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                       s->has_cached_mask ? s->cached_mask : s->empty_mask);
         const cv::Mat& fg_mat = s->fg_mask;
         spc::mat_to_frame(fg_mat, &s->output_frame, SPC_PIXEL_FORMAT_GRAY8,
-                         in_frame->frame_number, in_frame->timestamp_us);
+                         in_frame->frame_number, in_frame->timestamp_ns);
         outputs[0].type = SPC_DATA_FRAME;
         outputs[0].frame = &s->output_frame;
     }
@@ -305,6 +302,42 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 // memory from upstream's output buffer.
 
 #ifdef SPC_HAS_VULKAN
+// Acquire the engine-owned K-deep INPUT upload ring slot for this frame and
+// memcpy the CPU frame into its staging. Only used when the upstream input is
+// NOT already GPU-resident (gpu_input == NULL). The plugin copies the slot's
+// staging into one of its rolling STATE buffers; the slot's device buffer is
+// unused (WMV reads its 3 rolling buffers directly, not a separate input
+// binding). WMV here is 8-bit only (1 byte/channel). Returns false if the host
+// has no edge-ring service or the allocation failed (caller demotes to CPU).
+static bool acquire_input_upload(WmvBgsState* s, SpcGpuRecordCtx* rctx,
+                                 const SpcFrame* in_frame, int num_channels,
+                                 VkBuffer& in_staging)
+{
+    in_staging = VK_NULL_HANDLE;
+    if (!rctx->edge_ring_ctx) return false;
+    const uint32_t w = static_cast<uint32_t>(in_frame->width);
+    const uint32_t h = static_cast<uint32_t>(in_frame->height);
+    const int row_bytes = static_cast<int>(w) * num_channels;
+    // device + staging are sized input_device_size() (the padded frame_bytes_
+    // the pipeline's cmd_upload_input copies into the rolling buffer); only the
+    // real row_bytes*h bytes are memcpy'd in. Sizing staging at the unpadded
+    // frame size would overrun on the padded device copy.
+    const uint64_t ring_bytes = static_cast<uint64_t>(s->vk_pipeline.input_device_size());
+    SpcGpuEdgeBuffer up = s->host.acquire_ringed_upload(
+        rctx->edge_ring_ctx, 0, ring_bytes, ring_bytes);
+    if (!up.staging_buffer || !up.staging_mapped) return false;
+    auto* dst = static_cast<uint8_t*>(up.staging_mapped);
+    const auto* src = in_frame->data;
+    const int stride = static_cast<int>(in_frame->stride);
+    if (stride == row_bytes)
+        std::memcpy(dst, src, static_cast<size_t>(row_bytes) * h);
+    else
+        for (uint32_t y = 0; y < h; ++y)
+            std::memcpy(dst + y * row_bytes, src + y * stride, row_bytes);
+    in_staging = static_cast<VkBuffer>(up.staging_buffer);
+    return true;
+}
+
 static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 {
     auto* s = state(inst);
@@ -364,18 +397,42 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     const uint8_t* mask_in_ptr = s->has_cached_mask ? s->cached_mask.data : nullptr;
     int det_mask_stride = s->has_cached_mask ? static_cast<int>(s->cached_mask.step[0]) : 0;
 
+    auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
+    if (!cmd) return -1;
+
     SpcFrame* out = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (!out) return -1;
 
-    auto cmd = static_cast<VkCommandBuffer>(rctx->cmd_buffer_handle);
-    if (!cmd) {
+    // Acquire the engine-owned OUTPUT ring slot for this frame (binding 4 +
+    // download dst). The engine registers the slot's buffer + staging against
+    // the returned gpu_handle, so the post-submit invalidate covers it and
+    // downstream consumers resolve it by handle. Acquired on warmup frames too
+    // (record() simply doesn't write it then).
+    if (!rctx->edge_ring_ctx) { s->host.release_frame(out); return -1; }
+    SpcGpuEdgeBuffer outbuf = s->host.acquire_ringed_output(
+        rctx->edge_ring_ctx, 0, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
+        static_cast<uint64_t>(s->vk_pipeline.output_device_size()),
+        static_cast<uint64_t>(s->vk_pipeline.output_staging_size()));
+    if (!outbuf.device_buffer || !outbuf.staging_buffer || outbuf.gpu_handle == 0) {
+        s->host.release_frame(out);
+        return -1;
+    }
+
+    // CPU-fed input → acquire the upload ring slot + memcpy the frame into its
+    // staging (the rolling STATE buffers consume it). GPU-resident input →
+    // device-to-device, no upload ring.
+    VkBuffer in_staging = VK_NULL_HANDLE;
+    if (gpu_input_buf == VK_NULL_HANDLE &&
+        !acquire_input_upload(s, rctx, in_frame, num_channels, in_staging)) {
         s->host.release_frame(out);
         return -1;
     }
 
     // record() handles warmup (upload-only) and per-frame compute uniformly.
     if (!s->vk_pipeline.record(*s->vk_ctx, cmd,
-                                in_frame->data, static_cast<int>(in_frame->stride),
+                                in_staging,
+                                static_cast<VkBuffer>(outbuf.device_buffer),
+                                static_cast<VkBuffer>(outbuf.staging_buffer),
                                 mask_in_ptr, det_mask_stride,
                                 pc, gpu_input_buf)) {
         s->host.release_frame(out);
@@ -383,10 +440,11 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     }
 
     if (!s->vk_pipeline.ready()) {
-        // Warmup frame — no compute output. Emit zero mask + passthrough.
+        // Warmup frame — no compute output. Emit zero mask (NOT GPU-resident)
+        // + passthrough; the output ring slot stays unused this frame.
         std::memset(out->data, 0, static_cast<size_t>(out->stride) * h);
         out->frame_number = in_frame->frame_number;
-        out->timestamp_us = in_frame->timestamp_us;
+        out->timestamp_ns = in_frame->timestamp_ns;
         rctx->outputs[0].type = SPC_DATA_FRAME;
         rctx->outputs[0].frame = out;
         rctx->outputs[1].type = SPC_DATA_FRAME;
@@ -395,14 +453,12 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     }
 
     ++s->gpu_frame_count;
-    s->gpu_output.bind_to_frame(s->vk_ctx, out, in_frame,
-                                 s->vk_pipeline.packed_mask_buffer(),
-                                 s->vk_pipeline.packed_mask_memory(),
-                                 s->vk_pipeline.packed_mask_bytes(),
-                                 s->vk_pipeline.staging_output_mapped(),
-                                 &s->vk_pipeline.output_staging());
+    // Stamp the output frame as GPU-resident from the engine ring slot's handle
+    // (same fields GpuOutputHandle::bind_to_frame set on the prior path).
+    out->gpu_handle   = outbuf.gpu_handle;
+    out->gpu_flags   |= SPC_GPU_FLAG_RESIDENT;
     out->frame_number = in_frame->frame_number;
-    out->timestamp_us = in_frame->timestamp_us;
+    out->timestamp_ns = in_frame->timestamp_ns;
     rctx->outputs[0].type = SPC_DATA_FRAME;
     rctx->outputs[0].frame = out;
     rctx->outputs[1].type = SPC_DATA_FRAME;

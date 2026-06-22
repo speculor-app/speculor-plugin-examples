@@ -123,7 +123,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     }
 
     if (out_frame) {
-        out_frame->timestamp_us = 0;
+        out_frame->timestamp_ns = 0;
         out_frame->frame_number = s->frame_count++;
         outputs[0].type = SPC_DATA_FRAME;
         outputs[0].frame = out_frame;
