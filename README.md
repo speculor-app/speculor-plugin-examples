@@ -21,7 +21,7 @@ can wire up in the app.
 
    ```bash
    cmake -S . -B build -G Ninja \
-     -DCMAKE_PREFIX_PATH=/path/to/SpeculorSDK-0.13.1-Linux-x86_64
+     -DCMAKE_PREFIX_PATH=/path/to/SpeculorSDK-<version>-Linux-x86_64
    cmake --build build
    ```
 
@@ -29,7 +29,7 @@ can wire up in the app.
 
    ```powershell
    cmake -S . -B build -G Ninja `
-     -DCMAKE_PREFIX_PATH=C:\path\to\SpeculorSDK-0.13.1-Windows-x64
+     -DCMAKE_PREFIX_PATH=C:\path\to\SpeculorSDK-<version>-Windows-x64
    cmake --build build
    ```
 
@@ -115,7 +115,6 @@ SPC_PLUGIN_DESCRIPTOR(
         .author("You").version("1.0.0")
         .output("out", "Output", SPC_DATA_FRAME)
         .float_param("gain", "Gain", 0.0f, 10.0f, 1.0f, 0.1f)
-        .build()
 )
 
 // 4. Parameters — auto-bind struct fields (or write manual set/get)

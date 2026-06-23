@@ -8,7 +8,6 @@
 #ifdef SPC_HAS_VULKAN
 #include "wmv_gpu_pipeline.h"
 #include <gpu/gpu_buffer_registry.h>
-#include <gpu/gpu_output_handle.h>
 #include <gpu/gpu_failure_tracker.h>
 #endif
 
@@ -453,8 +452,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
     }
 
     ++s->gpu_frame_count;
-    // Stamp the output frame as GPU-resident from the engine ring slot's handle
-    // (same fields GpuOutputHandle::bind_to_frame set on the prior path).
+    // Stamp the output frame as GPU-resident from the engine ring slot's handle.
     out->gpu_handle   = outbuf.gpu_handle;
     out->gpu_flags   |= SPC_GPU_FLAG_RESIDENT;
     out->frame_number = in_frame->frame_number;
