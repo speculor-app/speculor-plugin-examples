@@ -9,6 +9,16 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # Weekly drift check: the examples build against the LATEST published SDK
+  # bundle, which moves independently of this repo. Nothing here re-runs when a
+  # new bundle ships, so without a schedule an SDK API break can sit undetected
+  # (the 0.13 → 0.25 gap went unverified this way). Monday 06:17 UTC.
+  schedule:
+    - cron: '17 6 * * 1'
+  # Fired by the speculor-sdk release workflow after it publishes a new bundle,
+  # so drift is caught on release day rather than up to a week later.
+  repository_dispatch:
+    types: [sdk-released]
 
 permissions:
   contents: read
@@ -43,7 +53,14 @@ jobs:
         run: |
           mkdir -p sdk/x
           if ls sdk/*.zip >/dev/null 2>&1; then
-            unzip -q sdk/*.zip -d sdk/x
+            # -DD: stamp every extracted entry with the extraction time instead
+            # of the archive's stored timestamp. The Windows bundle is zipped
+            # with naive-local DOS timestamps (no timezone), so files packaged
+            # on a UTC+N box otherwise land in the future on this UTC runner and
+            # CMake/Ninja loop forever ("build.ninja still dirty"). Defends this
+            # CI even against already-published bundles that predate the
+            # package-sdk.ps1 timestamp fix.
+            unzip -qDD sdk/*.zip -d sdk/x
           else
             tar -xzf sdk/*.tar.gz -C sdk/x
           fi
