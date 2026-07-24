@@ -1,0 +1,1 @@
+spc_add_plugin(threshold_event SOURCES threshold_event_plugin.cpp)

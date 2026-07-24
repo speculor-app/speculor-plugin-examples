@@ -5,8 +5,9 @@ real-time multi-camera / signal-processing platform. Every example here is an
 actual plugin pulled from Speculor's own plugin set, trimmed to the subset that
 builds against nothing but the public SDK. Together they exercise **every
 Speculor data type** (frames, scalars, signals, tables, records, control
-messages) plus GPU compute, and two of them chain into complete pipelines you
-can wire up in the app.
+messages) plus GPU compute, the event stream, the host disciplined clock, and
+replay-safe / license-gated nodes — and two of them chain into complete
+pipelines you can wire up in the app.
 
 ## Quick Start
 
@@ -55,6 +56,9 @@ Simplest first. The ⭐ rows form the pipelines described below.
 | **wave_gen** | — → signal | `SPC_DATA_SIGNAL` | SDK only | High-throughput signal output, real-time pacing, enum params |
 | **logic_gate** | scalar ×4 → scalar + ctrl | `SPC_DATA_SCALAR`, `SPC_DATA_CONTROL_MSG` | SDK only | Multiple inputs, boolean logic, emitting control messages to other nodes |
 | **system_stats** | — → table + record | `SPC_DATA_TABLE`, `SPC_DATA_RECORD` | OS libs | Schema-described table **and** JSON record output, cross-platform sampling |
+| **threshold_event** | scalar → *(event)* | `SPC_DATA_SCALAR`, `SpcEvent` | SDK only | Emitting `SpcEvent` BEGIN/END spans with severity via `host.emit_event()` |
+| **clock_probe** | — → record | `SPC_DATA_RECORD` | SDK only | Host disciplined clock via `spc::clock` — UTC ns, sync source, lock state |
+| **uplink_sink** | scalar → — | `SPC_DATA_SCALAR` | SDK only | `.live_only()` replay-safe egress + `.license_tier()` gating; pure sink |
 | **audio_analyzer** | signal → table | `SPC_DATA_SIGNAL` → `SPC_DATA_TABLE` | pocketfft (bundled) | `on_signal` callback, ring buffer, FFT, metrics table |
 | **blob_detect** ⭐ | frame → table | `SPC_DATA_FRAME` → `SPC_DATA_TABLE` | `spclib` | Connected-component detection, bbox table output, frame passthrough |
 | **bbox_display** ⭐ | table + frame → frame | `SPC_DATA_TABLE` + `SPC_DATA_FRAME` | OpenCV (bundled) | Consuming a table, OpenCV drawing via `cv_helpers.h` |
@@ -87,11 +91,15 @@ Speculor connects nodes with a small set of typed packets (`SpcDataType` in
 | Type | Use for | Produced by | Consumed by |
 |------|---------|-------------|-------------|
 | `SPC_DATA_FRAME` | Video / image frames | pattern_source, blob_detect, bbox_display, wmv_bgs | wmv_bgs, blob_detect, bbox_display |
-| `SPC_DATA_SCALAR` | Single typed numeric/bool values | scalar_source, logic_gate | logic_gate |
+| `SPC_DATA_SCALAR` | Single typed numeric/bool values | scalar_source, logic_gate | logic_gate, threshold_event, uplink_sink |
 | `SPC_DATA_SIGNAL` | High-throughput sample streams (audio / RF) | wave_gen | audio_analyzer |
 | `SPC_DATA_TABLE` | Schema-described binary tables (hot path) | system_stats, audio_analyzer, blob_detect | bbox_display |
-| `SPC_DATA_RECORD` | JSON metadata (cold path) | system_stats | — |
+| `SPC_DATA_RECORD` | JSON metadata (cold path) | system_stats, clock_probe | — |
 | `SPC_DATA_CONTROL_MSG` | Inter-node parameter control | logic_gate | (any node's params) |
+
+> `SpcEvent` (emitted by **threshold_event**) is not a port data type — it's a
+> host-service side channel (`host.emit_event()`) that the engine routes to the
+> `/events` stream and the GUI, so it has no input port to consume it.
 
 ## Plugin structure
 

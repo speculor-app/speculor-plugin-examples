@@ -1,0 +1,1 @@
+spc_add_plugin(uplink_sink SOURCES uplink_sink_plugin.cpp)

@@ -10,8 +10,10 @@
 A curated set of **real** [Speculor](https://speculor.app) plugins, pulled from
 Speculor's own plugin set and trimmed to the subset that builds against nothing
 but the public SDK bundle. They collectively exercise every `SpcDataType`
-(frame, scalar, signal, table, record, control message) plus GPU compute, and
-two of them chain into runnable pipelines (see README). Built against the
+(frame, scalar, signal, table, record, control message) plus GPU compute, the
+event stream (`emit_event`), the host disciplined clock (`spc::clock`), and
+replay-safe / license-gated nodes — and two of them chain into runnable
+pipelines (see README). Built against the
 [Speculor SDK bundle](https://github.com/speculor-app/speculor-sdk-dist/releases)
 (source: private `speculor-sdk`).
 
@@ -24,6 +26,9 @@ examples/
   wave_gen/           # SIGNAL out — synthetic waveform, real-time pacing
   logic_gate/         # SCALAR in -> SCALAR + CONTROL_MSG out — boolean logic
   system_stats/       # TABLE + RECORD out — cross-platform OS metrics
+  threshold_event/    # SCALAR in -> SpcEvent — emit_event, BEGIN/END spans
+  clock_probe/        # RECORD out — host disciplined clock (spc::clock)
+  uplink_sink/        # SCALAR in -> sink — live_only + license_tier
   audio_analyzer/     # SIGNAL in -> TABLE out — on_signal, ring buffer, FFT
   blob_detect/        # FRAME in -> TABLE out — spclib connected components
   bbox_display/       # TABLE + FRAME in -> FRAME out — OpenCV drawing
@@ -92,6 +97,9 @@ application's `plugins/` directory.
 | **wave_gen** | `output_signal()` schema, high-throughput signal output, enum params, real-time pacing |
 | **logic_gate** | Multiple scalar inputs, boolean logic, emitting `SPC_DATA_CONTROL_MSG` to drive other nodes' params |
 | **system_stats** | `output_table()` schema **and** `SPC_DATA_RECORD` JSON co-output, multi-file plugin, platform libs |
+| **threshold_event** | `SpcEvent` fill + `host.emit_event()`, `SPC_EVENT_BEGIN`/`END` spans + severity, `spc::input_scalar` |
+| **clock_probe** | `spc::clock::get_time()` disciplined clock (`SpcTimeInfo`), `SPC_DATA_RECORD` JSON output, interval pacing |
+| **uplink_sink** | `.live_only()` (`SPC_PLUGIN_LIVE_ONLY`, replay egress safety) + `.license_tier(SPC_LICENSE_PERSONAL)`, pure sink |
 | **audio_analyzer** | `input_signal()`, `on_signal` callback, `SpcRingBuffer`, FFT (`pocketfft_hdronly.h`), metrics table |
 | **blob_detect** | `SpeculorSDK::spclib` (`connectedBlobDetection`), `output_table()` of bboxes, `.passthrough()` input |
 | **bbox_display** | Consuming a table (`input_table()`), OpenCV drawing via `cv_helpers.h`, `${OpenCV_LIBS}` link |
@@ -136,4 +144,6 @@ authoritative "does this still build against the deployed SDK" check.
 | Simplest example | `examples/scalar_source/scalar_source_plugin.cpp` |
 | GPU example      | `examples/wmv_bgs/wmv_bgs_plugin.cpp`           |
 | Signal example   | `examples/audio_analyzer/audio_analyzer_plugin.cpp` |
+| Event example    | `examples/threshold_event/threshold_event_plugin.cpp` |
+| Clock example    | `examples/clock_probe/clock_probe_plugin.cpp`   |
 | CI               | `.github/workflows/build.yml`                   |

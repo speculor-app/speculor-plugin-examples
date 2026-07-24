@@ -1,0 +1,1 @@
+spc_add_plugin(clock_probe SOURCES clock_probe_plugin.cpp)
