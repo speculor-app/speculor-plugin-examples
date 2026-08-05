@@ -28,6 +28,7 @@ add_subdirectory(examples/system_stats)      # TABLE + RECORD out (OS metrics)
 add_subdirectory(examples/threshold_event)   # SCALAR in -> SpcEvent (emit_event)
 add_subdirectory(examples/clock_probe)       # RECORD out (host disciplined clock)
 add_subdirectory(examples/uplink_sink)       # SCALAR in -> sink (live_only + license_tier)
+add_subdirectory(examples/udp_scalar_source) # SCALAR out (UDP) — data_source + request_stop
 
 # SDK + bundled helper libs (pocketfft / OpenCV / spclib):
 add_subdirectory(examples/audio_analyzer)    # SIGNAL in -> TABLE out (FFT, pocketfft)

@@ -59,6 +59,7 @@ Simplest first. The ⭐ rows form the pipelines described below.
 | **threshold_event** | scalar → *(event)* | `SPC_DATA_SCALAR`, `SpcEvent` | SDK only | Emitting `SpcEvent` BEGIN/END spans with severity via `host.emit_event()` |
 | **clock_probe** | — → record | `SPC_DATA_RECORD` | SDK only | Host disciplined clock via `spc::clock` — UTC ns, sync source, lock state |
 | **uplink_sink** | scalar → — | `SPC_DATA_SCALAR` | SDK only | `.live_only()` replay-safe egress + `.license_tier()` gating; pure sink |
+| **udp_scalar_source** | *(UDP)* → scalar | `SPC_DATA_SCALAR` | SDK only | `.data_source()` for recordable ingress + two-phase shutdown (`request_stop`) with a **bounded** socket wait |
 | **audio_analyzer** | signal → table | `SPC_DATA_SIGNAL` → `SPC_DATA_TABLE` | pocketfft (bundled) | `on_signal` callback, ring buffer, FFT, metrics table |
 | **blob_detect** ⭐ | frame → table | `SPC_DATA_FRAME` → `SPC_DATA_TABLE` | `spclib` | Connected-component detection, bbox table output, frame passthrough |
 | **bbox_display** ⭐ | table + frame → frame | `SPC_DATA_TABLE` + `SPC_DATA_FRAME` | OpenCV (bundled) | Consuming a table, OpenCV drawing via `cv_helpers.h` |

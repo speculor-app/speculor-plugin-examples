@@ -17,6 +17,7 @@ set(_examples
     threshold_event
     clock_probe
     uplink_sink
+    udp_scalar_source
     audio_analyzer
     blob_detect
     bbox_display

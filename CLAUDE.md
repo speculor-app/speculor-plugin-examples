@@ -30,6 +30,7 @@ examples/
   threshold_event/    # SCALAR in -> SpcEvent — emit_event, BEGIN/END spans
   clock_probe/        # RECORD out — host disciplined clock (spc::clock)
   uplink_sink/        # SCALAR in -> sink — live_only + license_tier
+  udp_scalar_source/  # SCALAR out — data_source + request_stop, bounded socket wait
   audio_analyzer/     # SIGNAL in -> TABLE out — on_signal, ring buffer, FFT
   blob_detect/        # FRAME in -> TABLE out — spclib connected components
   bbox_display/       # TABLE + FRAME in -> FRAME out — OpenCV drawing
@@ -104,6 +105,7 @@ application's `plugins/` directory.
 | **threshold_event** | `SpcEvent` fill + `host.emit_event()`, `SPC_EVENT_BEGIN`/`END` spans + severity, `spc::input_scalar` |
 | **clock_probe** | `spc::clock::get_time()` disciplined clock (`SpcTimeInfo`), `SPC_DATA_RECORD` JSON output, interval pacing |
 | **uplink_sink** | `.live_only()` (`SPC_PLUGIN_LIVE_ONLY`, replay egress safety) + `.license_tier(SPC_LICENSE_PERSONAL)`, pure sink |
+| **udp_scalar_source** | `.data_source()` (`SPC_PLUGIN_DATA_SOURCE`, recordable/replayable ingress), two-phase shutdown via `request_stop` + `stop`, bounded `poll`/`WSAPoll` wait so engine shutdown terminates |
 | **audio_analyzer** | `input_signal()`, `on_signal` callback, `SpcRingBuffer`, FFT (`pocketfft_hdronly.h`), metrics table |
 | **blob_detect** | `SpeculorSDK::spclib` (`connectedBlobDetection`), `output_table()` of bboxes, `.passthrough()` input |
 | **bbox_display** | Consuming a table (`input_table()`), OpenCV drawing via `cv_helpers.h`, `${OpenCV_LIBS}` link |
