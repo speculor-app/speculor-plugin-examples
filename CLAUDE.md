@@ -39,6 +39,11 @@ examples/
 tests/
   conformance_runner.cpp  # SDK conformance against one plugin named on argv[1]
   CMakeLists.txt          # one add_test per example
+templates/
+  standalone-plugin/      # complete project to copy — own project(), own test.
+                          #   NOT an add_subdirectory child: CI configures it
+                          #   separately, which is what proves a bundle is
+                          #   self-contained. Keep it that way.
 ```
 
 ## Build System

@@ -45,6 +45,12 @@ pipelines you can wire up in the app.
 3. **Copy the built plugins** from `build/plugins/` into Speculor's `plugins/`
    directory and restart the app — they'll appear in the node palette.
 
+## Starting your own plugin
+
+Copy [`templates/standalone-plugin/`](templates/standalone-plugin) — a complete project with a plugin, a `CMakeLists.txt` and a conformance test.
+
+Everything under `examples/` is a child of one parent CMake project, so those `CMakeLists.txt` files are one line each and are **not** what you would write on your own. The template is standalone, and CI configures it separately against the published bundle, so it also proves an extracted bundle can build a plugin with nothing else installed.
+
 ## Examples
 
 Simplest first. The ⭐ rows form the pipelines described below.

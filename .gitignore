@@ -2,6 +2,7 @@
 .vs/
 .vscode/
 build/
-build/
+build-template/
+build-tmpl*/
 CMakeUserPresets.json
 sdk/
