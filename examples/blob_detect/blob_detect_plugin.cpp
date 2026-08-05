@@ -152,23 +152,23 @@ static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcPar
             || spc::try_set_float(name, value, "bbox_padding", p.bbox_padding);
     });
     if (matched) s->params_dirty.store(true, std::memory_order_release);
-    return matched ? 0 : -1;
+    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
 {
     const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_int(name, out, "size_threshold", p.size_threshold)) return 0;
-    if (spc::try_get_int(name, out, "area_threshold", p.area_threshold)) return 0;
+    if (spc::try_get_int(name, out, "size_threshold", p.size_threshold)) return SPC_OK;
+    if (spc::try_get_int(name, out, "area_threshold", p.area_threshold)) return SPC_OK;
     if (spc::try_get_int(name, out, "min_distance", p.min_distance)) {
         if (!p.enable_join) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
-    if (spc::try_get_int(name, out, "max_blobs", p.max_blobs)) return 0;
-    if (spc::try_get_bool(name, out, "enable_join", p.enable_join)) return 0;
-    if (spc::try_get_enum(name, out, "connectivity", p.connectivity)) return 0;
-    if (spc::try_get_float(name, out, "bbox_padding", p.bbox_padding)) return 0;
-    return -1;
+    if (spc::try_get_int(name, out, "max_blobs", p.max_blobs)) return SPC_OK;
+    if (spc::try_get_bool(name, out, "enable_join", p.enable_join)) return SPC_OK;
+    if (spc::try_get_enum(name, out, "connectivity", p.connectivity)) return SPC_OK;
+    if (spc::try_get_float(name, out, "bbox_padding", p.bbox_padding)) return SPC_OK;
+    return SPC_ERR_NOT_FOUND;
 }
 
 // --- streaming ---

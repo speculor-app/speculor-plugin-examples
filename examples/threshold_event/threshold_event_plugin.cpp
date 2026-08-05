@@ -50,16 +50,16 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
         return spc::try_set_float(name, value, "threshold", p.threshold)
             || spc::try_set_enum (name, value, "severity", p.severity);
     });
-    return matched ? 0 : -1;
+    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name,
                          SpcParameterDesc* out)
 {
     const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_float(name, out, "threshold", p.threshold)) return 0;
-    if (spc::try_get_enum (name, out, "severity", p.severity)) return 0;
-    return -1;
+    if (spc::try_get_float(name, out, "threshold", p.threshold)) return SPC_OK;
+    if (spc::try_get_enum (name, out, "severity", p.severity)) return SPC_OK;
+    return SPC_ERR_NOT_FOUND;
 }
 
 static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t input_count,

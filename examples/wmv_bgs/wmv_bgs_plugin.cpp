@@ -141,15 +141,15 @@ static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcPar
             || spc::try_set_float(name, value, "weight3", p.weight3);
     });
     if (matched) s->params_dirty.store(true, std::memory_order_release);
-    return matched ? 0 : -1;
+    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
 {
     const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_float(name, out, "threshold", p.threshold)) return 0;
-    if (spc::try_get_bool(name, out, "enable_weight", p.enable_weight)) return 0;
-    if (spc::try_get_bool(name, out, "enable_threshold", p.enable_threshold)) return 0;
+    if (spc::try_get_float(name, out, "threshold", p.threshold)) return SPC_OK;
+    if (spc::try_get_bool(name, out, "enable_weight", p.enable_weight)) return SPC_OK;
+    if (spc::try_get_bool(name, out, "enable_threshold", p.enable_threshold)) return SPC_OK;
     if (spc::try_get_float(name, out, "weight1", p.weight1)) {
         if (!p.enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
@@ -162,7 +162,7 @@ static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameter
         if (!p.enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
         return 0;
     }
-    return -1;
+    return SPC_ERR_NOT_FOUND;
 }
 
 // --- streaming ---

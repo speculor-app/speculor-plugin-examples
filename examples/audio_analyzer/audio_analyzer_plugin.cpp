@@ -173,17 +173,17 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
             || spc::try_set_int  (name, value, "sample_rate", p.sample_rate)
             || spc::try_set_float(name, value, "update_rate", p.update_rate);
     });
-    return matched ? 0 : -1;
+    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name,
                          SpcParameterDesc* out)
 {
     const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_int  (name, out, "window_size", p.window_size)) return 0;
-    if (spc::try_get_int  (name, out, "sample_rate", p.sample_rate)) return 0;
-    if (spc::try_get_float(name, out, "update_rate", p.update_rate)) return 0;
-    return -1;
+    if (spc::try_get_int  (name, out, "window_size", p.window_size)) return SPC_OK;
+    if (spc::try_get_int  (name, out, "sample_rate", p.sample_rate)) return SPC_OK;
+    if (spc::try_get_float(name, out, "update_rate", p.update_rate)) return SPC_OK;
+    return SPC_ERR_NOT_FOUND;
 }
 
 // ═══════════════════════════════════════════════════════════════════
