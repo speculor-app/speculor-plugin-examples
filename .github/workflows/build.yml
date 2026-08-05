@@ -134,3 +134,23 @@ jobs:
             export LD_LIBRARY_PATH="$SDK_ROOT/lib:${LD_LIBRARY_PATH:-}"
           fi
           ctest --test-dir build --output-on-failure --timeout 300
+
+      # Configured on its own, not as part of the build above: that is the whole
+      # point of the template, and it is what actually proves an extracted
+      # bundle can build a plugin with nothing else installed. Building it as a
+      # child of the parent project would test something else entirely.
+      - name: Build the standalone template
+        shell: bash
+        env:
+          SDK_ROOT: ${{ steps.sdk.outputs.root }}
+        run: |
+          cmake -S templates/standalone-plugin -B build-template -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$SDK_ROOT"
+          cmake --build build-template
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="$SDK_ROOT/bin:$PATH"
+          else
+            export LD_LIBRARY_PATH="$SDK_ROOT/lib:${LD_LIBRARY_PATH:-}"
+          fi
+          ctest --test-dir build-template --output-on-failure --timeout 300
