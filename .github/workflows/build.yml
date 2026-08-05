@@ -109,7 +109,8 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="${{ steps.sdk.outputs.root }}"
+            -DCMAKE_PREFIX_PATH="${{ steps.sdk.outputs.root }}" \
+            -DSPECULOR_BUILD_TESTS=ON
 
       - name: Build
         shell: bash
@@ -118,3 +119,18 @@ jobs:
       - name: List built plugins
         shell: bash
         run: ls -la build/plugins
+
+      # Conformance dlopens each example, so the bundle's shared libraries have
+      # to be resolvable — a plugin that cannot load its dependencies is
+      # indistinguishable from one that exports no vtable.
+      - name: Run tests
+        shell: bash
+        env:
+          SDK_ROOT: ${{ steps.sdk.outputs.root }}
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export PATH="$SDK_ROOT/bin:$PATH"
+          else
+            export LD_LIBRARY_PATH="$SDK_ROOT/lib:${LD_LIBRARY_PATH:-}"
+          fi
+          ctest --test-dir build --output-on-failure --timeout 300

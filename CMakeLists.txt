@@ -36,3 +36,15 @@ add_subdirectory(examples/bbox_display)      # TABLE + FRAME in -> FRAME out (Op
 
 # GPU (Vulkan compute, with automatic CPU fallback):
 add_subdirectory(examples/wmv_bgs)           # FRAME in -> FRAME out (GPU + spclib)
+
+# ── Tests ────────────────────────────────────────────────────────────
+# Conformance against every example, using the harness the bundle ships in
+# include/speculor_common/testing/. Copy tests/ into your own plugin project.
+#
+# Added last on purpose: the test list references the plugin targets, which
+# have to exist by the time this directory is processed.
+option(SPECULOR_BUILD_TESTS "Build the plugin conformance tests" ON)
+if(SPECULOR_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

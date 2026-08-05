@@ -1,6 +1,7 @@
-build/
-sdk/
 *.user
 .vs/
 .vscode/
+build/
+build/
 CMakeUserPresets.json
+sdk/

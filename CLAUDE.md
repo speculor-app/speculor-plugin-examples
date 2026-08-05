@@ -3,6 +3,7 @@
 ## Workflow Rules
 
 - **Never commit or push** unless the user explicitly asks you to.
+- **Every new example gets a conformance entry in `tests/CMakeLists.txt`.** The list there is explicit — an example nobody adds is never tested, which looks exactly like one that passes. These files are templates people copy, so a defect here propagates into other people's plugins.
 - **Always update documentation** (CLAUDE.md, README.md) before committing. Keep the example listings and data-type coverage current with code changes.
 
 ## Project Overview
@@ -34,6 +35,9 @@ examples/
   bbox_display/       # TABLE + FRAME in -> FRAME out — OpenCV drawing
   wmv_bgs/            # FRAME in -> FRAME out — Vulkan compute BGS + CPU fallback
     shaders/          #   wmv_compute.comp, wmv_pack_mask.comp
+tests/
+  conformance_runner.cpp  # SDK conformance against one plugin named on argv[1]
+  CMakeLists.txt          # one add_test per example
 ```
 
 ## Build System
@@ -133,8 +137,14 @@ SPC_PLUGIN_VTABLE(
 ## CI
 
 `.github/workflows/build.yml` downloads the latest published SDK bundle from
-`speculor-sdk-dist` and builds all examples on Windows + Linux. It is the
-authoritative "does this still build against the deployed SDK" check.
+`speculor-sdk-dist`, builds all examples on Windows + Linux, and runs `ctest`.
+It is the authoritative "does this still build against the deployed SDK" check.
+
+The weekly drift run is what makes it useful: it builds against whatever bundle
+is current, so an SDK release that breaks these examples surfaces here rather
+than in someone else's project. Conformance extends that from "still compiles"
+to "still loads and honours the ABI" — a header change can keep every example
+compiling while breaking the vtable the host actually reads.
 
 ## Key Files
 
