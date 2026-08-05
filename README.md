@@ -59,6 +59,7 @@ Simplest first. The ⭐ rows form the pipelines described below.
 | **threshold_event** | scalar → *(event)* | `SPC_DATA_SCALAR`, `SpcEvent` | SDK only | Emitting `SpcEvent` BEGIN/END spans with severity via `host.emit_event()` |
 | **clock_probe** | — → record | `SPC_DATA_RECORD` | SDK only | Host disciplined clock via `spc::clock` — UTC ns, sync source, lock state |
 | **uplink_sink** | scalar → — | `SPC_DATA_SCALAR` | SDK only | `.live_only()` replay-safe egress + `.license_tier()` gating; pure sink |
+| **udp_scalar_source** | *(UDP)* → scalar | `SPC_DATA_SCALAR` | SDK only | `.data_source()` for recordable ingress + two-phase shutdown (`request_stop`) with a **bounded** socket wait |
 | **audio_analyzer** | signal → table | `SPC_DATA_SIGNAL` → `SPC_DATA_TABLE` | pocketfft (bundled) | `on_signal` callback, ring buffer, FFT, metrics table |
 | **blob_detect** ⭐ | frame → table | `SPC_DATA_FRAME` → `SPC_DATA_TABLE` | `spclib` | Connected-component detection, bbox table output, frame passthrough |
 | **bbox_display** ⭐ | table + frame → frame | `SPC_DATA_TABLE` + `SPC_DATA_FRAME` | OpenCV (bundled) | Consuming a table, OpenCV drawing via `cv_helpers.h` |
@@ -188,10 +189,37 @@ spc_add_plugin(my_plugin SOURCES my_plugin.cpp)
 paths automatically. It does **not** auto-link OpenCV or spclib — opt in per
 plugin as shown above.
 
+## Testing your plugin
+
+`tests/` runs the SDK's conformance checks against every example, and is meant to be copied into your own project:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=/path/to/SpeculorSDK-<version>-...
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+The harness ships in the bundle at `include/speculor_common/testing/`, so there is nothing extra to install. `spc_add_plugin_test` builds the runner and puts those headers on the include path:
+
+```cmake
+enable_testing()
+spc_add_plugin_test(my_tests SOURCES conformance_runner.cpp PLUGINS my_plugin)
+add_test(NAME conformance.my_plugin COMMAND my_tests $<TARGET_FILE:my_plugin>)
+```
+
+Register **one `add_test` per plugin** — ctest then names the plugin that broke instead of reporting that "the tests" failed, and `ctest -R conformance.my_plugin` reruns just that one.
+
+`run_conformance()` loads the plugin the way the host does, through the exported `spc_plugin_vtable`, and checks it answers the ABI honestly: vtable and descriptor shape, every declared parameter readable by name and reporting its declared type, defaults inside their own ranges, `set_parameter` **rejecting** an undeclared name, and create/start/stop surviving a second `stop()`.
+
+That is the floor, not the goal. It proves your plugin loads and is ABI-honest — never that it works. For that, drive it with `FakeHost` (an `SpcHostServices` stand-in with a frame pool, captured logs and a controllable clock) and assert on what `process()` produces. Install host services **before** `start()`: that is the only order the host produces.
+
 ## Key APIs
 
 | Header | Purpose |
 |--------|---------|
+| `<testing/conformance.h>` | `run_conformance()` — checks every plugin must pass |
+| `<testing/plugin_under_test.h>` | `PluginUnderTest` — loads a built plugin via its vtable |
+| `<testing/fake_host.h>` | `FakeHost` — `SpcHostServices` stand-in for driving a plugin |
 | `<speculor/plugin_helpers.h>` | Macros, `DescriptorBuilder`, parameter binding, logging |
 | `<speculor/plugin_api.h>` | C ABI structs (`SpcPluginVTable`, `SpcHostServices`, `SpcData`) |
 | `<speculor/data_types.h>` | `SpcFrame`, `SpcScalar`, `SpcTable`, `SpcRecord`, pixel formats |

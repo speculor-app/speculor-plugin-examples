@@ -66,15 +66,15 @@ static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcPar
             || spc::try_set_int  (name, value, "height", p.height)
             || spc::try_set_float(name, value, "target_fps", p.target_fps);
     });
-    return matched ? 0 : -1;
+    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out) {
     const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_int  (name, out, "width", p.width)) return 0;
-    if (spc::try_get_int  (name, out, "height", p.height)) return 0;
-    if (spc::try_get_float(name, out, "target_fps", p.target_fps)) return 0;
-    return -1;
+    if (spc::try_get_int  (name, out, "width", p.width)) return SPC_OK;
+    if (spc::try_get_int  (name, out, "height", p.height)) return SPC_OK;
+    if (spc::try_get_float(name, out, "target_fps", p.target_fps)) return SPC_OK;
+    return SPC_ERR_NOT_FOUND;
 }
 
 static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t /*input_count*/,

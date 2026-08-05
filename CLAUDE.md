@@ -3,6 +3,7 @@
 ## Workflow Rules
 
 - **Never commit or push** unless the user explicitly asks you to.
+- **Every new example gets a conformance entry in `tests/CMakeLists.txt`.** The list there is explicit — an example nobody adds is never tested, which looks exactly like one that passes. These files are templates people copy, so a defect here propagates into other people's plugins.
 - **Always update documentation** (CLAUDE.md, README.md) before committing. Keep the example listings and data-type coverage current with code changes.
 
 ## Project Overview
@@ -29,11 +30,15 @@ examples/
   threshold_event/    # SCALAR in -> SpcEvent — emit_event, BEGIN/END spans
   clock_probe/        # RECORD out — host disciplined clock (spc::clock)
   uplink_sink/        # SCALAR in -> sink — live_only + license_tier
+  udp_scalar_source/  # SCALAR out — data_source + request_stop, bounded socket wait
   audio_analyzer/     # SIGNAL in -> TABLE out — on_signal, ring buffer, FFT
   blob_detect/        # FRAME in -> TABLE out — spclib connected components
   bbox_display/       # TABLE + FRAME in -> FRAME out — OpenCV drawing
   wmv_bgs/            # FRAME in -> FRAME out — Vulkan compute BGS + CPU fallback
     shaders/          #   wmv_compute.comp, wmv_pack_mask.comp
+tests/
+  conformance_runner.cpp  # SDK conformance against one plugin named on argv[1]
+  CMakeLists.txt          # one add_test per example
 ```
 
 ## Build System
@@ -100,6 +105,7 @@ application's `plugins/` directory.
 | **threshold_event** | `SpcEvent` fill + `host.emit_event()`, `SPC_EVENT_BEGIN`/`END` spans + severity, `spc::input_scalar` |
 | **clock_probe** | `spc::clock::get_time()` disciplined clock (`SpcTimeInfo`), `SPC_DATA_RECORD` JSON output, interval pacing |
 | **uplink_sink** | `.live_only()` (`SPC_PLUGIN_LIVE_ONLY`, replay egress safety) + `.license_tier(SPC_LICENSE_PERSONAL)`, pure sink |
+| **udp_scalar_source** | `.data_source()` (`SPC_PLUGIN_DATA_SOURCE`, recordable/replayable ingress), two-phase shutdown via `request_stop` + `stop`, bounded `poll`/`WSAPoll` wait so engine shutdown terminates |
 | **audio_analyzer** | `input_signal()`, `on_signal` callback, `SpcRingBuffer`, FFT (`pocketfft_hdronly.h`), metrics table |
 | **blob_detect** | `SpeculorSDK::spclib` (`connectedBlobDetection`), `output_table()` of bboxes, `.passthrough()` input |
 | **bbox_display** | Consuming a table (`input_table()`), OpenCV drawing via `cv_helpers.h`, `${OpenCV_LIBS}` link |
@@ -133,8 +139,14 @@ SPC_PLUGIN_VTABLE(
 ## CI
 
 `.github/workflows/build.yml` downloads the latest published SDK bundle from
-`speculor-sdk-dist` and builds all examples on Windows + Linux. It is the
-authoritative "does this still build against the deployed SDK" check.
+`speculor-sdk-dist`, builds all examples on Windows + Linux, and runs `ctest`.
+It is the authoritative "does this still build against the deployed SDK" check.
+
+The weekly drift run is what makes it useful: it builds against whatever bundle
+is current, so an SDK release that breaks these examples surfaces here rather
+than in someone else's project. Conformance extends that from "still compiles"
+to "still loads and honours the ABI" — a header change can keep every example
+compiling while breaking the vtable the host actually reads.
 
 ## Key Files
 

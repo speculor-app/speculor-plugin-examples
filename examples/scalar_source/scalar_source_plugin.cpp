@@ -29,14 +29,14 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     bool matched = state(inst)->params.update([&](Params& p) {
         return spc::try_set_float(name, value, "value", p.value);
     });
-    return matched ? 0 : -1;
+    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name,
                          SpcParameterDesc* out) {
     const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_float(name, out, "value", p.value)) return 0;
-    return -1;
+    if (spc::try_get_float(name, out, "value", p.value)) return SPC_OK;
+    return SPC_ERR_NOT_FOUND;
 }
 
 static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/,

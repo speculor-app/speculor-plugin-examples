@@ -47,15 +47,15 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     bool matched = state(inst)->params.update([&](Params& p) {
         return spc::try_set_int(name, value, "interval_sec", p.interval_sec);
     });
-    return matched ? 0 : -1;
+    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
 static int get_parameter(SpcPluginInstance* inst, const char* name,
                          SpcParameterDesc* out)
 {
     const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_int(name, out, "interval_sec", p.interval_sec)) return 0;
-    return -1;
+    if (spc::try_get_int(name, out, "interval_sec", p.interval_sec)) return SPC_OK;
+    return SPC_ERR_NOT_FOUND;
 }
 
 static const char* sync_name(uint32_t source)
