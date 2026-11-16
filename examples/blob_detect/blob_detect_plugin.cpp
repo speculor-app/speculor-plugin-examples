@@ -197,7 +197,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     }
 
     if (input_count < 1 || output_count < 2) return -1;
-    if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return -1;
+    if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return SPC_NO_DATA;
 
     SpcFrame* in_frame = const_cast<SpcFrame*>(inputs[0].frame);
     if (in_frame->format != SPC_PIXEL_FORMAT_GRAY8) return -1;
