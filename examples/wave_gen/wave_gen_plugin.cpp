@@ -120,17 +120,6 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name,
-                         SpcParameterDesc* out)
-{
-    const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_enum (name, out, "wave_type",   p.wave_type)) return SPC_OK;
-    if (spc::try_get_float(name, out, "frequency",   p.frequency)) return SPC_OK;
-    if (spc::try_get_float(name, out, "amplitude",   p.amplitude)) return SPC_OK;
-    if (spc::try_get_int  (name, out, "sample_rate", p.sample_rate)) return SPC_OK;
-    return SPC_ERR_NOT_FOUND;
-}
-
 // --- streaming ---
 
 static int start(SpcPluginInstance* inst)
@@ -230,8 +219,7 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
     .process           = process,
     .start             = start,
     .stop              = stop,
