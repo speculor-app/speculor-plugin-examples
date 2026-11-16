@@ -26,9 +26,9 @@ The built plugin lands in `build/` as `my_plugin.so` / `my_plugin.dll`. Drop it 
 
 ## What it shows
 
-**Generated parameters.** `SPC_PLUGIN_AUTO_PARAMS` writes `set_parameter`/`get_parameter` from a binding list, so the bindings *are* the implementation and a parameter cannot be declared and then left unreadable. Use it when parameter changes are pure dispatch.
+**Generated parameters.** `SPC_PLUGIN_AUTO_PARAMS` writes `set_parameter` from a binding list, so the bindings *are* the implementation: each value the host tells the plugin is copied into the bound field. The vtable exports it as `.params_changed = spc::params_by_name<get_descriptor, set_parameter>`. The host holds the values and answers every read, so there is nothing to write for reading one. Use it when parameter changes are pure dispatch.
 
-Write those two by hand when changing a parameter has to *do* something — reopen a device, resize a buffer, mark state dirty. Every example under `examples/` does it that way; [`blob_detect`](../../examples/blob_detect) is a good reference.
+Write `set_parameter` by hand when changing a parameter has to *do* something — reopen a device, resize a buffer, mark state dirty. Every example under `examples/` does it that way; [`blob_detect`](../../examples/blob_detect) is a good reference.
 
 **Pool-first frame output.** `process()` asks the engine's frame pool first, because a pooled frame is written in place and the engine skips a copy. The pool can be exhausted, so there is a fallback buffer — returning an error there would drop frames under load.
 

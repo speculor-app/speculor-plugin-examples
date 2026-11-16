@@ -155,20 +155,10 @@ static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcPar
     return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
+static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_int(name, out, "size_threshold", p.size_threshold)) return SPC_OK;
-    if (spc::try_get_int(name, out, "area_threshold", p.area_threshold)) return SPC_OK;
-    if (spc::try_get_int(name, out, "min_distance", p.min_distance)) {
-        if (!p.enable_join) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, "max_blobs", p.max_blobs)) return SPC_OK;
-    if (spc::try_get_bool(name, out, "enable_join", p.enable_join)) return SPC_OK;
-    if (spc::try_get_enum(name, out, "connectivity", p.connectivity)) return SPC_OK;
-    if (spc::try_get_float(name, out, "bbox_padding", p.bbox_padding)) return SPC_OK;
-    return SPC_ERR_NOT_FOUND;
+    spc::ParamRules r(get_descriptor(), values, states);
+    r.disable("min_distance", !r.on("enable_join"));
 }
 
 // --- streaming ---
@@ -333,8 +323,8 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .param_rules       = param_rules,
     .process           = process,
     .start             = start,
     .stop              = stop,

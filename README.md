@@ -132,7 +132,7 @@ SPC_PLUGIN_DESCRIPTOR(
         .float_param("gain", "Gain", 0.0f, 10.0f, 1.0f, 0.1f)
 )
 
-// 4. Parameters — auto-bind struct fields (or write manual set/get)
+// 4. Parameters — auto-bind struct fields (or write set_parameter by hand)
 SPC_PLUGIN_AUTO_PARAMS(MyState,
     SPC_BIND_FLOAT(MyState, "gain", gain)
 )
@@ -151,12 +151,19 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
     .process           = process,
     .set_host_services = set_host_services
 )
 ```
+
+The host holds every parameter value: it checks a new value against the declared
+type and range, saves it with the project and answers every read. The plugin is
+told the values and never asked. `spc::params_by_name` turns that into one call
+of `set_parameter(inst, name, value)` per changed parameter, and one for every
+parameter before `start()`; its return value is not looked at. A parameter that
+is greyed out or required depending on other values is a `.param_rules` function
+(see `bbox_display`).
 
 Signal-driven plugins add an `.on_signal` handler (see `audio_analyzer`); GPU
 plugins add a Vulkan pipeline + shaders (see `wmv_bgs`).
@@ -215,7 +222,7 @@ add_test(NAME conformance.my_plugin COMMAND my_tests $<TARGET_FILE:my_plugin>)
 
 Register **one `add_test` per plugin** — ctest then names the plugin that broke instead of reporting that "the tests" failed, and `ctest -R conformance.my_plugin` reruns just that one.
 
-`run_conformance()` loads the plugin the way the host does, through the exported `spc_plugin_vtable`, and checks it answers the ABI honestly: vtable and descriptor shape, every declared parameter readable by name and reporting its declared type, defaults inside their own ranges, `set_parameter` **rejecting** an undeclared name, and create/start/stop surviving a second `stop()`.
+`run_conformance()` loads the plugin the way the host does, through the exported `spc_plugin_vtable`, and checks it answers the ABI honestly: vtable and descriptor shape, parameter names unique, defaults inside their own ranges, the instance taking every value before `start()` and then each default again, and create/start/stop surviving a second `stop()`.
 
 That is the floor, not the goal. It proves your plugin loads and is ABI-honest — never that it works. For that, drive it with `FakeHost` (an `SpcHostServices` stand-in with a frame pool, captured logs and a controllable clock) and assert on what `process()` produces. Install host services **before** `start()`: that is the only order the host produces.
 

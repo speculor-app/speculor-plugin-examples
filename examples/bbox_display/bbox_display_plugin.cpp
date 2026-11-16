@@ -93,23 +93,11 @@ static int set_parameter(SpcPluginInstance* inst, const char* name,
     return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name,
-                         SpcParameterDesc* out)
+static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_color(name, out, "color", p.color_rgba)) return SPC_OK;
-    if (spc::try_get_int(name, out, "thickness", p.thickness)) return SPC_OK;
-    if (spc::try_get_bool(name, out, "show_info", p.show_info)) return SPC_OK;
-    if (spc::try_get_bool(name, out, "resize_enable", p.resize_enable)) return SPC_OK;
-    if (spc::try_get_int(name, out, "resize_width", p.resize_width)) {
-        if (!p.resize_enable) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_int(name, out, "resize_height", p.resize_height)) {
-        if (!p.resize_enable) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    return SPC_ERR_NOT_FOUND;
+    spc::ParamRules r(get_descriptor(), values, states);
+    r.disable("resize_width", !r.on("resize_enable"));
+    r.disable("resize_height", !r.on("resize_enable"));
 }
 
 // --- helpers ------------------------------------------------------------------
@@ -317,8 +305,8 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .param_rules       = param_rules,
     .process           = process,
     .set_host_services = set_host_services
 )

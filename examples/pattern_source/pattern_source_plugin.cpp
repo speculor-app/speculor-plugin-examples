@@ -69,14 +69,6 @@ static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcPar
     return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out) {
-    const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_int  (name, out, "width", p.width)) return SPC_OK;
-    if (spc::try_get_int  (name, out, "height", p.height)) return SPC_OK;
-    if (spc::try_get_float(name, out, "target_fps", p.target_fps)) return SPC_OK;
-    return SPC_ERR_NOT_FOUND;
-}
-
 static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t /*input_count*/,
                    SpcData* outputs, uint32_t output_count) {
     auto* s = state(inst);
@@ -144,8 +136,7 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
     .process           = process,
     .set_host_services = set_host_services
 )

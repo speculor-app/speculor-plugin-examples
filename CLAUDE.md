@@ -132,14 +132,16 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
     .process           = process,
     .set_host_services = set_host_services,
-    // add .start / .stop / .on_signal / .on_event / .record_gpu as needed —
-    // fields must appear in struct-declaration order
+    // add .param_rules / .list_options / .start / .stop / .on_signal /
+    // .on_input_event / .record_gpu as needed — fields must appear in
+    // struct-declaration order
 )
 ```
+
+The host holds every parameter value and answers every read; the plugin is told the values and never asked. `spc::params_by_name` calls `set_parameter(inst, name, value)` once per changed parameter, and once for every parameter before `start()`. Its return value is not looked at: the host has already checked the value against the declared type and range. A parameter greyed out or required because of other values is a `.param_rules` function (`spc::ParamRules`, see `bbox_display`).
 
 ## CI
 

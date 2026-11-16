@@ -144,25 +144,12 @@ static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcPar
     return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
 }
 
-static int get_parameter(SpcPluginInstance* inst, const char* name, SpcParameterDesc* out)
+static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    const Params p = state(inst)->params.snapshot();
-    if (spc::try_get_float(name, out, "threshold", p.threshold)) return SPC_OK;
-    if (spc::try_get_bool(name, out, "enable_weight", p.enable_weight)) return SPC_OK;
-    if (spc::try_get_bool(name, out, "enable_threshold", p.enable_threshold)) return SPC_OK;
-    if (spc::try_get_float(name, out, "weight1", p.weight1)) {
-        if (!p.enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "weight2", p.weight2)) {
-        if (!p.enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    if (spc::try_get_float(name, out, "weight3", p.weight3)) {
-        if (!p.enable_weight) out->flags |= SPC_PARAM_FLAG_DISABLED;
-        return 0;
-    }
-    return SPC_ERR_NOT_FOUND;
+    spc::ParamRules r(get_descriptor(), values, states);
+    r.disable("weight1", !r.on("enable_weight"));
+    r.disable("weight2", !r.on("enable_weight"));
+    r.disable("weight3", !r.on("enable_weight"));
 }
 
 // --- streaming ---
@@ -470,8 +457,8 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .param_rules       = param_rules,
     .process           = process,
     .start             = start,
     .stop              = stop,
@@ -483,8 +470,8 @@ SPC_PLUGIN_VTABLE(
     .get_descriptor    = get_descriptor,
     .create_instance   = create_instance,
     .destroy_instance  = destroy_instance,
-    .set_parameter     = set_parameter,
-    .get_parameter     = get_parameter,
+    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
+    .param_rules       = param_rules,
     .process           = process,
     .start             = start,
     .stop              = stop,
