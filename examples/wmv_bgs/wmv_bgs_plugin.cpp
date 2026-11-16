@@ -7,7 +7,7 @@
 
 #ifdef SPC_HAS_VULKAN
 #include "wmv_gpu_pipeline.h"
-#include <gpu/gpu_buffer_registry.h>
+#include <gpu/gpu_host.h>
 #include <gpu/gpu_failure_tracker.h>
 #endif
 
@@ -182,7 +182,7 @@ static int start(SpcPluginInstance* inst)
 #ifdef SPC_HAS_VULKAN
     s->gpu_available = false;
     s->gpu_frame_count = 0;
-    s->vk_ctx = spc::gpu::VulkanContext::get_shared();
+    s->vk_ctx = spc::gpu::context_from_host(s->host.svc);
     if (s->vk_ctx && s->vk_pipeline.init(*s->vk_ctx))
     {
         s->gpu_available = true;
@@ -379,7 +379,7 @@ static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
                         (in_frame->gpu_flags & SPC_GPU_FLAG_RESIDENT);
     VkBuffer gpu_input_buf = VK_NULL_HANDLE;
     if (input_on_gpu) {
-        auto entry = spc::gpu::GpuBufferRegistry::instance().lookup(in_frame->gpu_handle);
+        auto entry = spc::gpu::buffer_from_host(s->host.svc, in_frame->gpu_handle);
         if (entry.buffer != VK_NULL_HANDLE) gpu_input_buf = entry.buffer;
     }
 
