@@ -67,7 +67,6 @@ SPC_PLUGIN_DESCRIPTOR(
             .param_description("Seconds between system statistics samples")
         .string_param("disk_path", "Disk Path", SPC_DEFAULT_DISK_PATH, "Disk")
             .param_description("Filesystem path to monitor for disk usage")
-        .streaming()
 )
 
 // ============================================================================

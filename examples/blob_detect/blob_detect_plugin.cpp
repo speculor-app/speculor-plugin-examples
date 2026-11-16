@@ -81,7 +81,7 @@ SPC_PLUGIN_DESCRIPTOR(
             .param_description("Maximum number of blobs to report per frame")
         .float_param("bbox_padding", "Bbox Padding", 0.0f, 0.5f, 0.0f, 0.01f, "Detection")
             .param_description("Symmetric margin added around each output bbox, as a fraction of bbox size. Clamped to frame bounds. Does not affect centroid, area, mean intensity, solidity, or aspect ratio.")
-        .streaming().frame_alloc()
+        .frame_alloc()
 )
 
 // --- lifecycle ---

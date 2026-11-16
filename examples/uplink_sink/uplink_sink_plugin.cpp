@@ -36,7 +36,6 @@ SPC_PLUGIN_DESCRIPTOR(
         .input("value_in", "Value", SPC_DATA_SCALAR)
         .string_param("endpoint", "Endpoint", "udp://localhost:9000", "Uplink")
             .param_description("Destination the sample would be transmitted to")
-        .streaming()
 )
 
 static int set_parameter(SpcPluginInstance* inst, const char* name,

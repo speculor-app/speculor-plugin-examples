@@ -131,7 +131,6 @@ SPC_PLUGIN_DESCRIPTOR(
             .param_description("Fallback sample rate if not provided by upstream signal")
         .float_param("update_rate", "Update Rate (Hz)", 1.0f, 60.0f, 10.0f, 1.0f, "Output")
             .param_description("Maximum analysis output rate in Hz")
-        .streaming()
 )
 
 // ═══════════════════════════════════════════════════════════════════

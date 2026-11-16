@@ -38,7 +38,6 @@ SPC_PLUGIN_DESCRIPTOR(
         .output("clock_out", "Clock", SPC_DATA_RECORD)
         .int_param("interval_sec", "Interval (sec)", 1, 60, 1, 1, "Sampling")
             .param_description("Seconds between clock readings")
-        .streaming()
 )
 
 static int set_parameter(SpcPluginInstance* inst, const char* name,
