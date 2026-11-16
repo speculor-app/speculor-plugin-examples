@@ -177,7 +177,7 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
 {
     auto* s = state(inst);
     if (input_count < 2 || output_count < 1) return -1;
-    if (inputs[1].type != SPC_DATA_FRAME || !inputs[1].frame) return -1;
+    if (inputs[1].type != SPC_DATA_FRAME || !inputs[1].frame) return SPC_NO_DATA;
 
     const SpcFrame* in = inputs[1].frame;
     int cv_type = spc::cv_type_for_format(in->format);
