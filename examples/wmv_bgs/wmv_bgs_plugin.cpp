@@ -82,7 +82,7 @@ SPC_PLUGIN_DESCRIPTOR(
             .param_description("Weight of the second background frame")
         .float_param("weight3", "Weight 3", 0.0f, 1.0f, 0.2f, 0.01f, "WMV")
             .param_description("Weight of the oldest background frame")
-        .streaming().frame_alloc()
+        .frame_alloc()
 )
 
 // --- lifecycle ---
@@ -340,7 +340,7 @@ static bool acquire_input_upload(WmvBgsState* s, SpcGpuRecordCtx* rctx,
 static int record_gpu(SpcPluginInstance* inst, SpcGpuRecordCtx* rctx)
 {
     auto* s = state(inst);
-    if (!rctx || rctx->struct_size < sizeof(SpcGpuRecordCtx)) return -1;
+    if (!rctx) return -1;
     if (rctx->input_count < 1 || rctx->output_count < 2) return -1;
     if (rctx->inputs[0].type != SPC_DATA_FRAME || !rctx->inputs[0].frame) return -1;
     if (!s->gpu_available || !s->vk_ctx) return -1;

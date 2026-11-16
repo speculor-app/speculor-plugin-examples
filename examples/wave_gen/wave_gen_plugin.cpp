@@ -81,7 +81,6 @@ SPC_PLUGIN_DESCRIPTOR(
             .param_description("Signal amplitude (0 to 1)")
         .int_param("sample_rate", "Sample Rate", 8000, 192000, 44100, 1000, "Output")
             .param_description("Output sample rate in Hz")
-        .streaming()
 )
 
 // --- lifecycle ---

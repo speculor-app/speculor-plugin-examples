@@ -40,7 +40,6 @@ SPC_PLUGIN_DESCRIPTOR(
         .enum_param("severity", "Severity",
                     {"Info", "Notice", "Warning", "Critical"}, SPC_EVENT_WARNING, "Events")
             .param_description("Severity carried on the emitted events")
-        .streaming()
 )
 
 static int set_parameter(SpcPluginInstance* inst, const char* name,
@@ -74,7 +73,6 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     s->above = above;
 
     SpcEvent e{};
-    e.struct_size = sizeof(e);
     e.category    = SPC_FOURCC('T', 'H', 'R', 'S');
     e.severity    = static_cast<uint32_t>(p.severity);
     // timestamp_ns left 0 -> the host stamps the event with its disciplined clock

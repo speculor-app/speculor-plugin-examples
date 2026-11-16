@@ -78,7 +78,6 @@ SPC_PLUGIN_DESCRIPTOR(
         .param_description("Value sent when result becomes true")
         .float_param("cmd_false_value", "False Value", -1e6f, 1e6f, 0.0f, 0.1f, "Param Command")
         .param_description("Value sent when result becomes false")
-        .streaming()
 )
 
 static int set_parameter(SpcPluginInstance* inst, const char* name,
