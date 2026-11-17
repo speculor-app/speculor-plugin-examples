@@ -69,7 +69,7 @@ SPC_PLUGIN_CAST(AudioAnalyzerState)
 SPC_PLUGIN_HOST_SERVICES(AudioAnalyzerState, host)
 
 // ═══════════════════════════════════════════════════════════════════
-// signal handler (runs on producer thread)
+// signal handler (process() calls it with each block waiting)
 // ═══════════════════════════════════════════════════════════════════
 
 static int on_signal_handler(AudioAnalyzerState* s, uint32_t port_index, const SpcTable* data)
@@ -80,8 +80,6 @@ static int on_signal_handler(AudioAnalyzerState* s, uint32_t port_index, const S
         s->upstream_sample_rate = data->sample_rate_hz;
     return 0;
 }
-
-SPC_PLUGIN_SIGNAL_CALLBACK(AudioAnalyzerState, on_signal_handler)
 
 // ═══════════════════════════════════════════════════════════════════
 // Hann window precomputation
@@ -213,6 +211,9 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
                    SpcData* outputs, uint32_t output_count)
 {
     auto* s = state(inst);
+    spc::take_signals(s->host, get_descriptor(), [s](uint32_t port, const SpcTable* block) {
+        on_signal_handler(s, port, block);
+    });
     if (output_count < 1) return -1;
 
     const Params p = s->params.snapshot();  // one consistent view per frame
@@ -333,6 +334,5 @@ SPC_PLUGIN_VTABLE(
     .process           = process,
     .start             = start,
     .stop              = stop,
-    .set_host_services = set_host_services,
-    .on_signal         = on_signal
+    .set_host_services = set_host_services
 )
