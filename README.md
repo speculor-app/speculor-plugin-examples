@@ -68,7 +68,7 @@ Simplest first. The ⭐ rows form the pipelines described below.
 | **udp_scalar_source** | *(UDP)* → scalar | `SPC_DATA_SCALAR` | SDK only | `.data_source()` for recordable ingress + two-phase shutdown (`request_stop`) with a **bounded** socket wait |
 | **audio_analyzer** | signal → table | `SPC_DATA_SIGNAL` → `SPC_DATA_TABLE` | pocketfft (bundled) | Signal blocks taken in `process()`, ring buffer, FFT, metrics table |
 | **blob_detect** ⭐ | frame → table | `SPC_DATA_FRAME` → `SPC_DATA_TABLE` | `spclib` | Connected-component detection, bbox table output, frame passthrough |
-| **bbox_display** ⭐ | table + frame → frame | `SPC_DATA_TABLE` + `SPC_DATA_FRAME` | OpenCV (bundled) | Consuming a table, OpenCV drawing via `cv_helpers.h` |
+| **bbox_display** ⭐ | table + frame → frame | `SPC_DATA_TABLE` + `SPC_DATA_FRAME` | OpenCV (bundled) | Consuming a table with required and optional fields, OpenCV drawing via `cv_helpers.h` |
 | **wmv_bgs** ⭐ | frame → frame | `SPC_DATA_FRAME` | `spclib` + GPU | **Vulkan compute** background subtraction with automatic CPU fallback |
 
 ### Pipelines you can build from these
@@ -164,6 +164,17 @@ of `set_parameter(inst, name, value)` per changed parameter, and one for every
 parameter before `start()`; its return value is not looked at. A parameter that
 is greyed out or required depending on other values is a `.param_rules` function
 (see `bbox_display`).
+
+A table or signal output is filled in a table the host lends:
+`s->host.table(output, rows)` returns a zeroed table of that output port's
+schema, valid until `process()` returns, and putting it in `outputs[]` emits it
+with no copy. Its `field_offsets` say where each field of the port is, in the
+order the descriptor declares them (see `system_stats`, `blob_detect`,
+`wave_gen`). A table arriving on an input carries `field_offsets` too, one entry
+per field that input port declares. A field the plugin can do without is
+declared with `.optional_fields({...})` after the port, and its entry is
+`SPC_NO_FIELD` when the producer does not send it (see `bbox_display`). A plugin
+declares every field it reads and never looks one up by name.
 
 A plugin with a signal input takes its blocks in `process()` with `spc::take_signals` (see `audio_analyzer`); GPU
 plugins add a Vulkan pipeline + shaders (see `wmv_bgs`).

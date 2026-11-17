@@ -66,20 +66,12 @@ SPC_PLUGIN_DESCRIPTOR(
 
 static SpcPluginInstance* create_instance()
 {
-    auto* s = new SystemStatsState{};
-
-    auto* desc = get_descriptor();
-    spc_schema_compute_offsets(&desc->ports[0].schema, s->offsets, &s->stride);
-    spc_table_init(&s->output_table, s->stride, &desc->ports[0].schema);
-
-    return reinterpret_cast<SpcPluginInstance*>(s);
+    return reinterpret_cast<SpcPluginInstance*>(new SystemStatsState{});
 }
 
 static void destroy_instance(SpcPluginInstance* inst)
 {
-    auto* s = state(inst);
-    spc_table_free(&s->output_table);
-    delete s;
+    delete state(inst);
 }
 
 static int start(SpcPluginInstance* inst)
@@ -154,36 +146,38 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     s->prev_net_sent = net.sent;
     s->prev_net_recv = net.recv;
 
-    // --- fill table (single row) ---
-    if (spc_table_resize(&s->output_table, 1) != 0) return -1;
+    // --- fill table (single row, lent by the host until process() returns) ---
+    SpcTable* out = s->host.table(0, 1);
+    if (!out) return -1;
+    const uint32_t* off = out->field_offsets;
 
-    spc_table_set_float(&s->output_table,  0, s->offsets[F_CPU_USAGE_PCT],    cpu_pct);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_CPU_CORE_COUNT],   s->core_count);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_CPU_THREAD_COUNT], s->thread_count);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_MEM_TOTAL_MB],     mem.total_mb);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_MEM_USED_MB],      mem.used_mb);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_MEM_AVAILABLE_MB], mem.available_mb);
-    spc_table_set_float(&s->output_table,  0, s->offsets[F_MEM_USAGE_PCT],    mem.usage_pct);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_SWAP_TOTAL_MB],    mem.swap_total_mb);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_SWAP_USED_MB],     mem.swap_used_mb);
-    spc_table_set_float(&s->output_table,  0, s->offsets[F_DISK_TOTAL_GB],    disk.total_gb);
-    spc_table_set_float(&s->output_table,  0, s->offsets[F_DISK_USED_GB],     disk.used_gb);
-    spc_table_set_float(&s->output_table,  0, s->offsets[F_DISK_FREE_GB],     disk.free_gb);
-    spc_table_set_float(&s->output_table,  0, s->offsets[F_DISK_USAGE_PCT],   disk.usage_pct);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_NET_BYTES_SENT],   net_sent_delta);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_NET_BYTES_RECV],   net_recv_delta);
-    spc_table_set_bool(&s->output_table,   0, s->offsets[F_NET_CONNECTED],    net.connected ? 1 : 0);
-    spc_table_set_float(&s->output_table,  0, s->offsets[F_PROC_CPU_PCT],     proc_cpu);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_PROC_MEM_MB],      proc_mem);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_UPTIME_SEC],       uptime);
-    spc_table_set_uint32(&s->output_table, 0, s->offsets[F_CPU_FREQ_MHZ],     s->cpu_freq_mhz);
+    spc_table_set_float(out,  0, off[F_CPU_USAGE_PCT],    cpu_pct);
+    spc_table_set_uint32(out, 0, off[F_CPU_CORE_COUNT],   s->core_count);
+    spc_table_set_uint32(out, 0, off[F_CPU_THREAD_COUNT], s->thread_count);
+    spc_table_set_uint32(out, 0, off[F_MEM_TOTAL_MB],     mem.total_mb);
+    spc_table_set_uint32(out, 0, off[F_MEM_USED_MB],      mem.used_mb);
+    spc_table_set_uint32(out, 0, off[F_MEM_AVAILABLE_MB], mem.available_mb);
+    spc_table_set_float(out,  0, off[F_MEM_USAGE_PCT],    mem.usage_pct);
+    spc_table_set_uint32(out, 0, off[F_SWAP_TOTAL_MB],    mem.swap_total_mb);
+    spc_table_set_uint32(out, 0, off[F_SWAP_USED_MB],     mem.swap_used_mb);
+    spc_table_set_float(out,  0, off[F_DISK_TOTAL_GB],    disk.total_gb);
+    spc_table_set_float(out,  0, off[F_DISK_USED_GB],     disk.used_gb);
+    spc_table_set_float(out,  0, off[F_DISK_FREE_GB],     disk.free_gb);
+    spc_table_set_float(out,  0, off[F_DISK_USAGE_PCT],   disk.usage_pct);
+    spc_table_set_uint32(out, 0, off[F_NET_BYTES_SENT],   net_sent_delta);
+    spc_table_set_uint32(out, 0, off[F_NET_BYTES_RECV],   net_recv_delta);
+    spc_table_set_bool(out,   0, off[F_NET_CONNECTED],    net.connected ? 1 : 0);
+    spc_table_set_float(out,  0, off[F_PROC_CPU_PCT],     proc_cpu);
+    spc_table_set_uint32(out, 0, off[F_PROC_MEM_MB],      proc_mem);
+    spc_table_set_uint32(out, 0, off[F_UPTIME_SEC],       uptime);
+    spc_table_set_uint32(out, 0, off[F_CPU_FREQ_MHZ],     s->cpu_freq_mhz);
 
-    s->output_table.frame_number = s->frame_number++;
-    s->output_table.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    out->frame_number = s->frame_number++;
+    out->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
 
     outputs[0].type = SPC_DATA_TABLE;
-    outputs[0].table = &s->output_table;
+    outputs[0].table = out;
 
     // --- build JSON record ---
     // escape backslashes in disk_path for JSON

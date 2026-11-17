@@ -8,8 +8,13 @@
 #include <format>
 #include <vector>
 
-// input schema field indices
-enum { F_X = 0, F_Y, F_W, F_H, F_CONFIDENCE, IN_FIELD_COUNT };
+// boxes_in field indices, in the order the descriptor declares them:
+// the required fields, then the optional ones
+enum {
+    F_X = 0, F_Y, F_W, F_H, F_CONFIDENCE,
+    F_AREA, F_MEAN_INTENSITY, F_LABEL_NAME, F_CLASS_NAME,
+    IN_FIELD_COUNT
+};
 
 // GUI-thread-set parameters, snapshotted on the worker (H6)
 struct Params {
@@ -30,21 +35,6 @@ struct BboxDisplayState {
     SpcFrame output_frame{};
     cv::Mat converted_rgb; // keeps RGB conversion alive across output
     cv::Mat resized_mat;   // keeps resized frame alive across output
-
-    // cached input field offsets (resolved from incoming table schema)
-    uint32_t in_off_x{};
-    uint32_t in_off_y{};
-    uint32_t in_off_w{};
-    uint32_t in_off_h{};
-    uint32_t in_off_confidence{};
-    uint32_t in_off_area{};
-    uint32_t in_off_intensity{};
-    uint32_t in_off_class_name{};
-    bool in_offsets_resolved = false;
-    bool has_area = false;
-    bool has_intensity = false;
-    bool has_class_name = false;
-
 };
 
 SPC_PLUGIN(BboxDisplayState, host)
@@ -60,6 +50,12 @@ SPC_PLUGIN_DESCRIPTOR(
             {"w", SPC_FIELD_FLOAT}, {"h", SPC_FIELD_FLOAT},
             {"confidence", SPC_FIELD_FLOAT},
         }, 4, SPC_CONSUME_LATEST)
+        .optional_fields({
+            {"area", SPC_FIELD_FLOAT},
+            {"mean_intensity", SPC_FIELD_FLOAT},
+            {"label_name", SPC_FIELD_STRING32},
+            {"class_name", SPC_FIELD_STRING32},
+        })
         .input("image_in", "Image", SPC_DATA_FRAME)
         .output("image_out", "Image Out", SPC_DATA_FRAME)
         .color_param("color", "Color", spc::color_pack(0, 255, 0))
@@ -127,31 +123,6 @@ static cv::Mat acquire_and_copy_frame(BboxDisplayState* s, const SpcFrame* in,
             cv_type, dst_ptr, static_cast<size_t>(dst_stride)};
 }
 
-// resolve field offsets from incoming table schema on first use
-static void resolve_bbox_offsets(BboxDisplayState* s, const SpcTable* tbl)
-{
-    if (s->in_offsets_resolved || !tbl->schema) return;
-
-    s->in_off_x = spc_schema_field_offset(tbl->schema, "x");
-    s->in_off_y = spc_schema_field_offset(tbl->schema, "y");
-    s->in_off_w = spc_schema_field_offset(tbl->schema, "w");
-    s->in_off_h = spc_schema_field_offset(tbl->schema, "h");
-    s->in_off_confidence = spc_schema_field_offset(tbl->schema, "confidence");
-    s->in_off_area = spc_schema_field_offset(tbl->schema, "area");
-    s->has_area = (s->in_off_area != UINT32_MAX);
-    s->in_off_intensity = spc_schema_field_offset(tbl->schema, "mean_intensity");
-    s->has_intensity = (s->in_off_intensity != UINT32_MAX);
-    // prefer label_name (smoothed by track_class_enricher) over class_name
-    // (raw detector / mode-of-history vote) — same convention as track_display
-    s->in_off_class_name = spc_schema_field_offset(tbl->schema, "label_name");
-    s->has_class_name = (s->in_off_class_name != UINT32_MAX);
-    if (!s->has_class_name) {
-        s->in_off_class_name = spc_schema_field_offset(tbl->schema, "class_name");
-        s->has_class_name = (s->in_off_class_name != UINT32_MAX);
-    }
-    s->in_offsets_resolved = true;
-}
-
 // set output data (pool path or fallback path)
 static void set_frame_output(BboxDisplayState* s, const SpcFrame* in,
                              SpcFrame* pool_frame, SpcData* output)
@@ -202,7 +173,14 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
     // draw boxes from the first input
     if (inputs[0].type == SPC_DATA_TABLE && inputs[0].table) {
         const SpcTable* tbl = inputs[0].table;
-        resolve_bbox_offsets(s, tbl);
+
+        // where each declared field is in this table's records; an optional
+        // field the producer does not send is SPC_NO_FIELD
+        const uint32_t* off = tbl->field_offsets;
+        // prefer label_name (smoothed by track_class_enricher) over class_name
+        // (raw detector / mode-of-history vote) — same convention as track_display
+        const uint32_t off_name = off[F_LABEL_NAME] != SPC_NO_FIELD
+            ? off[F_LABEL_NAME] : off[F_CLASS_NAME];
 
         uint8_t cr, cg, cb, ca;
         spc::color_unpack(p.color_rgba, cr, cg, cb, ca);
@@ -211,11 +189,11 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
         auto fh = static_cast<float>(in->height);
 
         for (uint32_t i = 0; i < tbl->record_count; ++i) {
-            float bx = spc_table_get_float(tbl, i, s->in_off_x);
-            float by = spc_table_get_float(tbl, i, s->in_off_y);
-            float bw = spc_table_get_float(tbl, i, s->in_off_w);
-            float bh = spc_table_get_float(tbl, i, s->in_off_h);
-            float conf = spc_table_get_float(tbl, i, s->in_off_confidence);
+            float bx = spc_table_get_float(tbl, i, off[F_X]);
+            float by = spc_table_get_float(tbl, i, off[F_Y]);
+            float bw = spc_table_get_float(tbl, i, off[F_W]);
+            float bh = spc_table_get_float(tbl, i, off[F_H]);
+            float conf = spc_table_get_float(tbl, i, off[F_CONFIDENCE]);
 
             int x = static_cast<int>(bx * fw);
             int y = static_cast<int>(by * fh);
@@ -226,19 +204,19 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
 
             if (p.show_info) {
                 std::string label;
-                if (s->has_class_name) {
-                    const char* cname = spc_table_get_string(tbl, i, s->in_off_class_name);
+                if (off_name != SPC_NO_FIELD) {
+                    const char* cname = spc_table_get_string(tbl, i, off_name);
                     if (cname && cname[0] != '\0')
                         label = std::format("{} {:.0f}%", cname, conf * 100.0f);
                 }
                 if (label.empty())
                     label = std::format("#{} {:.0f}%", i, conf * 100.0f);
-                if (s->has_area) {
-                    float area = spc_table_get_float(tbl, i, s->in_off_area);
+                if (off[F_AREA] != SPC_NO_FIELD) {
+                    float area = spc_table_get_float(tbl, i, off[F_AREA]);
                     label += std::format(" A:{:.1f}", area * 10000.0f);
                 }
-                if (s->has_intensity) {
-                    float intensity = spc_table_get_float(tbl, i, s->in_off_intensity);
+                if (off[F_MEAN_INTENSITY] != SPC_NO_FIELD) {
+                    float intensity = spc_table_get_float(tbl, i, off[F_MEAN_INTENSITY]);
                     label += std::format(" I:{:.0f}", intensity * 255.0f);
                 }
                 int baseline = 0;
