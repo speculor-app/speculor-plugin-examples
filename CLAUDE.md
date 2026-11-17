@@ -31,7 +31,7 @@ examples/
   clock_probe/        # RECORD out — host disciplined clock (spc::clock)
   uplink_sink/        # SCALAR in -> sink — live_only + license_tier
   udp_scalar_source/  # SCALAR out — data_source + request_stop, bounded socket wait
-  audio_analyzer/     # SIGNAL in -> TABLE out — on_signal, ring buffer, FFT
+  audio_analyzer/     # SIGNAL in -> TABLE out — take_signals, ring buffer, FFT
   blob_detect/        # FRAME in -> TABLE out — spclib connected components
   bbox_display/       # TABLE + FRAME in -> FRAME out — OpenCV drawing
   wmv_bgs/            # FRAME in -> FRAME out — Vulkan compute BGS + CPU fallback
@@ -111,7 +111,7 @@ application's `plugins/` directory.
 | **clock_probe** | `spc::clock::get_time()` disciplined clock (`SpcTimeInfo`), `SPC_DATA_RECORD` JSON output, interval pacing |
 | **uplink_sink** | `.live_only()` (`SPC_PLUGIN_LIVE_ONLY`, replay egress safety) + `.license_tier(SPC_LICENSE_PERSONAL)`, pure sink |
 | **udp_scalar_source** | `.data_source()` (`SPC_PLUGIN_DATA_SOURCE`, recordable/replayable ingress), two-phase shutdown via `request_stop` + `stop`, bounded `poll`/`WSAPoll` wait so engine shutdown terminates |
-| **audio_analyzer** | `input_signal()`, `on_signal` callback, `SpcRingBuffer`, FFT (`pocketfft_hdronly.h`), metrics table |
+| **audio_analyzer** | `input_signal()`, `spc::take_signals` in `process()`, `SpcRingBuffer`, FFT (`pocketfft_hdronly.h`), metrics table |
 | **blob_detect** | `SpeculorSDK::spclib` (`connectedBlobDetection`), `output_table()` of bboxes, `.passthrough()` input |
 | **bbox_display** | Consuming a table (`input_table()`), OpenCV drawing via `cv_helpers.h`, `${OpenCV_LIBS}` link |
 | **wmv_bgs** | Vulkan compute (`spc_enable_gpu`, `spc_add_gpu_shaders`), `GpuPipelineBase`, `#ifdef SPC_HAS_VULKAN` CPU fallback via spclib `WeightedMovingVariance` |
@@ -122,7 +122,6 @@ application's `plugins/` directory.
 SPC_PLUGIN(StateType, host_field)           // Auto create/destroy/state/set_host_services
 SPC_PLUGIN_CAST(StateType)                  // Manual state casting only
 SPC_PLUGIN_HOST_SERVICES(StateType, field)  // Manual host services injection
-SPC_PLUGIN_SIGNAL_CALLBACK(StateType, fn)   // Wire up an on_signal handler
 ```
 
 ## Plugin Export
@@ -135,7 +134,7 @@ SPC_PLUGIN_VTABLE(
     .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
     .process           = process,
     .set_host_services = set_host_services,
-    // add .param_rules / .list_options / .start / .stop / .on_signal /
+    // add .param_rules / .list_options / .start / .stop /
     // .on_input_event / .record_gpu as needed — fields must appear in
     // struct-declaration order
 )

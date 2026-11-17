@@ -66,7 +66,7 @@ Simplest first. The ⭐ rows form the pipelines described below.
 | **clock_probe** | — → record | `SPC_DATA_RECORD` | SDK only | Host disciplined clock via `spc::clock` — UTC ns, sync source, lock state |
 | **uplink_sink** | scalar → — | `SPC_DATA_SCALAR` | SDK only | `.live_only()` replay-safe egress + `.license_tier()` gating; pure sink |
 | **udp_scalar_source** | *(UDP)* → scalar | `SPC_DATA_SCALAR` | SDK only | `.data_source()` for recordable ingress + two-phase shutdown (`request_stop`) with a **bounded** socket wait |
-| **audio_analyzer** | signal → table | `SPC_DATA_SIGNAL` → `SPC_DATA_TABLE` | pocketfft (bundled) | `on_signal` callback, ring buffer, FFT, metrics table |
+| **audio_analyzer** | signal → table | `SPC_DATA_SIGNAL` → `SPC_DATA_TABLE` | pocketfft (bundled) | Signal blocks taken in `process()`, ring buffer, FFT, metrics table |
 | **blob_detect** ⭐ | frame → table | `SPC_DATA_FRAME` → `SPC_DATA_TABLE` | `spclib` | Connected-component detection, bbox table output, frame passthrough |
 | **bbox_display** ⭐ | table + frame → frame | `SPC_DATA_TABLE` + `SPC_DATA_FRAME` | OpenCV (bundled) | Consuming a table, OpenCV drawing via `cv_helpers.h` |
 | **wmv_bgs** ⭐ | frame → frame | `SPC_DATA_FRAME` | `spclib` + GPU | **Vulkan compute** background subtraction with automatic CPU fallback |
@@ -165,7 +165,7 @@ parameter before `start()`; its return value is not looked at. A parameter that
 is greyed out or required depending on other values is a `.param_rules` function
 (see `bbox_display`).
 
-Signal-driven plugins add an `.on_signal` handler (see `audio_analyzer`); GPU
+A plugin with a signal input takes its blocks in `process()` with `spc::take_signals` (see `audio_analyzer`); GPU
 plugins add a Vulkan pipeline + shaders (see `wmv_bgs`).
 
 ## CMakeLists.txt for your own plugin
