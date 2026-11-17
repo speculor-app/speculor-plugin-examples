@@ -60,7 +60,7 @@ Simplest first. The ⭐ rows form the pipelines described below.
 | **scalar_source** | — → scalar | `SPC_DATA_SCALAR` | SDK only | Minimal plugin, `SPC_PLUGIN`, auto params |
 | **pattern_source** ⭐ | — → frame | `SPC_DATA_FRAME` | SDK only | Frame-pool allocation, FPS pacing, test pattern |
 | **wave_gen** | — → signal | `SPC_DATA_SIGNAL` | SDK only | High-throughput signal output, real-time pacing, enum params |
-| **logic_gate** | scalar ×4 → scalar + ctrl | `SPC_DATA_SCALAR`, `SPC_DATA_CONTROL_MSG` | SDK only | Multiple inputs, boolean logic, emitting control messages to other nodes |
+| **logic_gate** | scalar ×4 → scalar + ctrl | `SPC_DATA_SCALAR`, `SPC_DATA_CONTROL_MSG` | SDK only | Multiple inputs, boolean logic, sending control commands to other nodes through the host (`s->host.control(out_port).set_float(...)`) |
 | **system_stats** | — → table + record | `SPC_DATA_TABLE`, `SPC_DATA_RECORD` | OS libs | Schema-described table **and** JSON record output, cross-platform sampling |
 | **threshold_event** | scalar → *(event)* | `SPC_DATA_SCALAR`, `SpcEvent` | SDK only | Emitting `SpcEvent` BEGIN/END spans with severity via `host.emit_event()` |
 | **clock_probe** | — → record | `SPC_DATA_RECORD` | SDK only | Host disciplined clock via `spc::clock` — UTC ns, sync source, lock state |
