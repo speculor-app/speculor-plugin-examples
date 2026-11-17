@@ -201,13 +201,8 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                 break;
         }
 
-        if (should_emit) {
-            SpcControlMsg cmd{};
-            spc::param_cmd_clear(&cmd);
-            spc::param_cmd_set_float(&cmd, p.cmd_param, cmd_value);
-            outputs[1].type = SPC_DATA_CONTROL_MSG;
-            outputs[1].control_msg = &cmd;
-        }
+        if (should_emit)
+            s->host.control(1).set_float(p.cmd_param, cmd_value);
     }
 
     s->prev_result = result;

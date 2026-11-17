@@ -105,7 +105,7 @@ application's `plugins/` directory.
 | **scalar_source** | `SPC_PLUGIN()`, `SPC_PLUGIN_DESCRIPTOR()`, auto params, `SPC_DATA_SCALAR` output |
 | **pattern_source** | Frame-pool allocation (`host.acquire_frame()`), FPS pacing, fallback buffer |
 | **wave_gen** | `output_signal()` schema, signal block filled in a host-lent table (`host.table()`), enum params, real-time pacing |
-| **logic_gate** | Multiple scalar inputs, boolean logic, emitting `SPC_DATA_CONTROL_MSG` to drive other nodes' params |
+| **logic_gate** | Multiple scalar inputs, boolean logic, driving other nodes' params from an `SPC_DATA_CONTROL_MSG` output: commands go through the host (`s->host.control(out_port).set_float(name, value)`), never a message the plugin builds |
 | **system_stats** | `output_table()` schema filled in a host-lent table (`host.table()`, `field_offsets`) **and** `SPC_DATA_RECORD` JSON co-output, multi-file plugin, platform libs |
 | **threshold_event** | `SpcEvent` fill + `host.emit_event()`, `SPC_EVENT_BEGIN`/`END` spans + severity, `spc::input_scalar` |
 | **clock_probe** | `spc::clock::get_time()` disciplined clock (`SpcTimeInfo`), `SPC_DATA_RECORD` JSON output, interval pacing |
