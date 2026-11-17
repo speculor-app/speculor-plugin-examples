@@ -26,9 +26,6 @@ struct Params
 struct WaveGenState
 {
     spc::HostServices host;
-    SpcTable output_table;
-    uint32_t offsets[FIELD_COUNT];
-    uint32_t stride;
 
     // cross-thread parameter block (GUI writes, worker snapshots per frame)
     spc::SharedParams<Params> params;
@@ -90,20 +87,12 @@ static SpcPluginInstance* create_instance()
     auto* s = new WaveGenState{};
     s->phase = 0.0;
     s->sample_count = 0;
-
-    // precompute field offsets from output schema
-    auto* desc = get_descriptor();
-    spc_schema_compute_offsets(&desc->ports[0].schema, s->offsets, &s->stride);
-    spc_table_init(&s->output_table, s->stride, &desc->ports[0].schema);
-
     return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
 static void destroy_instance(SpcPluginInstance* inst)
 {
-    auto* s = state(inst);
-    spc_table_free(&s->output_table);
-    delete s;
+    delete state(inst);
 }
 
 // --- parameters ---
@@ -190,28 +179,32 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
         if (to_generate == 0) return 0;
     }
 
-    if (spc_table_resize(&s->output_table, to_generate) != 0) return -1;
+    // the host lends the output table: zeroed, to_generate records of the
+    // port's schema, valid until process() returns
+    SpcTable* out = s->host.table(0, to_generate);
+    if (!out) return -1;
+    const uint32_t* off = out->field_offsets;
 
     double phase_inc = static_cast<double>(p.frequency) / static_cast<double>(p.sample_rate);
 
     for (uint32_t i = 0; i < to_generate; ++i)
     {
         float sample = generate_sample(p.wave_type, s->phase, p.amplitude);
-        spc_table_set_float(&s->output_table, i, s->offsets[F_AMPLITUDE], sample);
+        spc_table_set_float(out, i, off[F_AMPLITUDE], sample);
 
         s->phase += phase_inc;
         if (s->phase >= 1.0) s->phase -= 1.0;
     }
 
     // timestamp from cumulative sample position
-    s->output_table.frame_number = s->sample_count / min_batch;
-    s->output_table.timestamp_ns = static_cast<int64_t>(
+    out->frame_number = s->sample_count / min_batch;
+    out->timestamp_ns = static_cast<int64_t>(
         static_cast<double>(s->sample_count) / static_cast<double>(p.sample_rate) * 1e9);
 
     s->sample_count += to_generate;
 
     outputs[0].type = SPC_DATA_SIGNAL;
-    outputs[0].table = &s->output_table;
+    outputs[0].table = out;
     return 0;
 }
 

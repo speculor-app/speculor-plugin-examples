@@ -40,9 +40,6 @@ struct Params
 struct AudioAnalyzerState
 {
     spc::HostServices host;
-    SpcTable output_table;
-    uint32_t offsets[OUT_FIELD_COUNT];
-    uint32_t stride;
 
     // signal input ring
     SpcRingBuffer* signal_ring = nullptr;
@@ -138,12 +135,6 @@ SPC_PLUGIN_DESCRIPTOR(
 static SpcPluginInstance* create_instance()
 {
     auto* s = new AudioAnalyzerState{};
-
-    auto* desc = get_descriptor();
-    // output port is port index 1 (after input)
-    spc_schema_compute_offsets(&desc->ports[1].schema, s->offsets, &s->stride);
-    spc_table_init(&s->output_table, s->stride, &desc->ports[1].schema);
-
     s->signal_ring = spc_ring_create(ring_capacity, sizeof(float));
     s->window_buf.resize(4096, 0.0f);
     precompute_hann(s, 4096);
@@ -153,7 +144,6 @@ static SpcPluginInstance* create_instance()
 static void destroy_instance(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
-    spc_table_free(&s->output_table);
     spc_ring_destroy(s->signal_ring);
     delete s;
 }
@@ -305,24 +295,27 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     float spectral_centroid = (mag_sum > 1e-10f) ? (weighted_sum / mag_sum) : 0.0f;
     float dominant_freq = static_cast<float>(max_bin) * bin_resolution;
 
-    if (spc_table_resize(&s->output_table, 1) != 0) return -1;
+    // one row in a table the host lends for output 0, valid until process() returns
+    SpcTable* out = s->host.table(0, 1);
+    if (!out) return -1;
+    const uint32_t* off = out->field_offsets;
 
-    spc_table_set_float(&s->output_table, 0, s->offsets[F_RMS_DB], rms_db);
-    spc_table_set_float(&s->output_table, 0, s->offsets[F_PEAK_DB], peak_db);
-    spc_table_set_float(&s->output_table, 0, s->offsets[F_CREST_FACTOR], crest);
-    spc_table_set_float(&s->output_table, 0, s->offsets[F_SPECTRAL_CENTROID], spectral_centroid);
-    spc_table_set_float(&s->output_table, 0, s->offsets[F_DOMINANT_FREQ], dominant_freq);
-    spc_table_set_float(&s->output_table, 0, s->offsets[F_ZERO_CROSSING_RATE], zcr);
+    spc_table_set_float(out, 0, off[F_RMS_DB], rms_db);
+    spc_table_set_float(out, 0, off[F_PEAK_DB], peak_db);
+    spc_table_set_float(out, 0, off[F_CREST_FACTOR], crest);
+    spc_table_set_float(out, 0, off[F_SPECTRAL_CENTROID], spectral_centroid);
+    spc_table_set_float(out, 0, off[F_DOMINANT_FREQ], dominant_freq);
+    spc_table_set_float(out, 0, off[F_ZERO_CROSSING_RATE], zcr);
 
-    s->output_table.sample_rate_hz = sr;
-    s->output_table.frame_number = s->frame_number++;
-    s->output_table.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    out->sample_rate_hz = sr;
+    out->frame_number = s->frame_number++;
+    out->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now - s->last_output_time).count();
 
     s->last_output_time = now;
 
     outputs[0].type = SPC_DATA_TABLE;
-    outputs[0].table = &s->output_table;
+    outputs[0].table = out;
     return 0;
 }
 

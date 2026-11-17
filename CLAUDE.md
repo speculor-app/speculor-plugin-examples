@@ -104,16 +104,16 @@ application's `plugins/` directory.
 |---------|--------------------------|
 | **scalar_source** | `SPC_PLUGIN()`, `SPC_PLUGIN_DESCRIPTOR()`, auto params, `SPC_DATA_SCALAR` output |
 | **pattern_source** | Frame-pool allocation (`host.acquire_frame()`), FPS pacing, fallback buffer |
-| **wave_gen** | `output_signal()` schema, high-throughput signal output, enum params, real-time pacing |
+| **wave_gen** | `output_signal()` schema, signal block filled in a host-lent table (`host.table()`), enum params, real-time pacing |
 | **logic_gate** | Multiple scalar inputs, boolean logic, emitting `SPC_DATA_CONTROL_MSG` to drive other nodes' params |
-| **system_stats** | `output_table()` schema **and** `SPC_DATA_RECORD` JSON co-output, multi-file plugin, platform libs |
+| **system_stats** | `output_table()` schema filled in a host-lent table (`host.table()`, `field_offsets`) **and** `SPC_DATA_RECORD` JSON co-output, multi-file plugin, platform libs |
 | **threshold_event** | `SpcEvent` fill + `host.emit_event()`, `SPC_EVENT_BEGIN`/`END` spans + severity, `spc::input_scalar` |
 | **clock_probe** | `spc::clock::get_time()` disciplined clock (`SpcTimeInfo`), `SPC_DATA_RECORD` JSON output, interval pacing |
 | **uplink_sink** | `.live_only()` (`SPC_PLUGIN_LIVE_ONLY`, replay egress safety) + `.license_tier(SPC_LICENSE_PERSONAL)`, pure sink |
 | **udp_scalar_source** | `.data_source()` (`SPC_PLUGIN_DATA_SOURCE`, recordable/replayable ingress), two-phase shutdown via `request_stop` + `stop`, bounded `poll`/`WSAPoll` wait so engine shutdown terminates |
 | **audio_analyzer** | `input_signal()`, `spc::take_signals` in `process()`, `SpcRingBuffer`, FFT (`pocketfft_hdronly.h`), metrics table |
 | **blob_detect** | `SpeculorSDK::spclib` (`connectedBlobDetection`), `output_table()` of bboxes, `.passthrough()` input |
-| **bbox_display** | Consuming a table (`input_table()`), OpenCV drawing via `cv_helpers.h`, `${OpenCV_LIBS}` link |
+| **bbox_display** | Consuming a table (`input_table()`, `.optional_fields()`, reading through `field_offsets`), OpenCV drawing via `cv_helpers.h`, `${OpenCV_LIBS}` link |
 | **wmv_bgs** | Vulkan compute (`spc_enable_gpu`, `spc_add_gpu_shaders`), `GpuPipelineBase`, `#ifdef SPC_HAS_VULKAN` CPU fallback via spclib `WeightedMovingVariance` |
 
 ## Plugin State Macros
@@ -141,6 +141,12 @@ SPC_PLUGIN_VTABLE(
 ```
 
 The host holds every parameter value and answers every read; the plugin is told the values and never asked. `spc::params_by_name` calls `set_parameter(inst, name, value)` once per changed parameter, and once for every parameter before `start()`. Its return value is not looked at: the host has already checked the value against the declared type and range. A parameter greyed out or required because of other values is a `.param_rules` function (`spc::ParamRules`, see `bbox_display`).
+
+## Tables
+
+A table or signal output comes from the host: `s->host.table(output, rows)` lends a zeroed table of that output port's schema, valid until `process()` returns. Fill it, set its header (`timestamp_ns`, `frame_number`, and `sample_rate_hz` on a signal), and put it in `outputs[]`; the host publishes it with no copy. A new one is acquired every call. It may have its `record_count` lowered and must not be kept, resized or freed. Do not keep an `SpcTable` member with `spc_table_init` / `spc_table_resize`.
+
+Every table carries `field_offsets`. On a lent table it has one entry per field of the output port. On an input table it has one entry per field the input port declares, in declaration order: the `input_table()` fields, then the `.optional_fields({...})` ones, whose entry is `SPC_NO_FIELD` when the producer sends no field of that name and type. Declare every field the plugin reads and index `field_offsets` with an enum in the same order; never call `spc_schema_field_offset` on an input table.
 
 ## CI
 

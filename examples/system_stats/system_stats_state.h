@@ -48,9 +48,6 @@ struct SystemStatsState
     spc::HostServices host;
 
     // outputs
-    SpcTable output_table{};
-    uint32_t offsets[FIELD_COUNT]{};
-    uint32_t stride{};
     SpcRecord output_record{};
     std::string record_json;
 

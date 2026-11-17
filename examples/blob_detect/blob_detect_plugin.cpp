@@ -35,9 +35,6 @@ struct BlobDetectState
     std::unique_ptr<spclib::blobs::ConnectedBlobDetection> detector;
     cv::Mat input_image;
     std::vector<spclib::blobs::BlobInfo> blobs;
-    SpcTable output_table;
-    uint32_t offsets[FIELD_COUNT];
-    uint32_t stride;
 
     // cross-thread parameter block (GUI writes, worker snapshots per frame)
     spc::SharedParams<Params> params;
@@ -117,10 +114,6 @@ static SpcPluginInstance* create_instance()
 {
     auto* s = new BlobDetectState{};
 
-    auto* desc = get_descriptor();
-    spc_schema_compute_offsets(&desc->ports[2].schema, s->offsets, &s->stride);
-    spc_table_init(&s->output_table, s->stride, &desc->ports[2].schema);
-
     s->detector = std::make_unique<spclib::blobs::ConnectedBlobDetection>(
         build_params(s->params.snapshot()));
 
@@ -131,7 +124,6 @@ static void destroy_instance(SpcPluginInstance* inst)
 {
     auto* s = state(inst);
     s->detector.reset();
-    spc_table_free(&s->output_table);
     delete s;
 }
 
@@ -224,7 +216,11 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     auto count = static_cast<uint32_t>(s->blobs.size());
 
-    if (spc_table_resize(&s->output_table, count) != 0) return -1;
+    // one record per blob in a table the host lends for output 0, valid until
+    // process() returns
+    SpcTable* out = s->host.table(0, count);
+    if (!out) return -1;
+    const uint32_t* off = out->field_offsets;
 
     // optional: compute mean intensity from image_in if available
     const SpcFrame* img_frame = nullptr;
@@ -253,12 +249,12 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
         const float px1 = std::min(fw,   static_cast<float>(r.x + r.width)  + pad_x);
         const float py1 = std::min(fh,   static_cast<float>(r.y + r.height) + pad_y);
 
-        spc_table_set_float(&s->output_table, i, s->offsets[F_X], px0 / fw);
-        spc_table_set_float(&s->output_table, i, s->offsets[F_Y], py0 / fh);
-        spc_table_set_float(&s->output_table, i, s->offsets[F_W], (px1 - px0) / fw);
-        spc_table_set_float(&s->output_table, i, s->offsets[F_H], (py1 - py0) / fh);
-        spc_table_set_float(&s->output_table, i, s->offsets[F_CONFIDENCE], 1.0f);
-        spc_table_set_float(&s->output_table, i, s->offsets[F_AREA],
+        spc_table_set_float(out, i, off[F_X], px0 / fw);
+        spc_table_set_float(out, i, off[F_Y], py0 / fh);
+        spc_table_set_float(out, i, off[F_W], (px1 - px0) / fw);
+        spc_table_set_float(out, i, off[F_H], (py1 - py0) / fh);
+        spc_table_set_float(out, i, off[F_CONFIDENCE], 1.0f);
+        spc_table_set_float(out, i, off[F_AREA],
                            static_cast<float>(b.pixel_count) / total_pixels);
 
         // compute mean intensity from original image at bbox region
@@ -296,22 +292,22 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                 mean_intensity = static_cast<float>(sum) / (static_cast<float>(sample_count) * 255.f);
             }
         }
-        spc_table_set_float(&s->output_table, i, s->offsets[F_MEAN_INTENSITY], mean_intensity);
+        spc_table_set_float(out, i, off[F_MEAN_INTENSITY], mean_intensity);
 
-        spc_table_set_float(&s->output_table, i, s->offsets[F_CENTROID_X], b.centroid_x / fw);
-        spc_table_set_float(&s->output_table, i, s->offsets[F_CENTROID_Y], b.centroid_y / fh);
+        spc_table_set_float(out, i, off[F_CENTROID_X], b.centroid_x / fw);
+        spc_table_set_float(out, i, off[F_CENTROID_Y], b.centroid_y / fh);
 
-        spc_table_set_float(&s->output_table, i, s->offsets[F_SOLIDITY],
+        spc_table_set_float(out, i, off[F_SOLIDITY],
                            spclib::blobs::solidity(b));
-        spc_table_set_float(&s->output_table, i, s->offsets[F_ASPECT_RATIO],
+        spc_table_set_float(out, i, off[F_ASPECT_RATIO],
                            spclib::blobs::aspect_ratio(b));
     }
 
-    s->output_table.frame_number = in_frame->frame_number;
-    s->output_table.timestamp_ns = in_frame->timestamp_ns;
+    out->frame_number = in_frame->frame_number;
+    out->timestamp_ns = in_frame->timestamp_ns;
 
     outputs[0].type = SPC_DATA_TABLE;
-    outputs[0].table = &s->output_table;
+    outputs[0].table = out;
     if (img_frame) {
         outputs[1].type = SPC_DATA_FRAME;
         outputs[1].frame = const_cast<SpcFrame*>(img_frame);
