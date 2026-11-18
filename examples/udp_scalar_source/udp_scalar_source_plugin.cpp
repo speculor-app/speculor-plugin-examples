@@ -1,38 +1,39 @@
 // Receives newline-terminated numbers over UDP and emits the latest as SCALAR.
 //
-// The networking is incidental. This example exists to show the two pieces of
-// SDK surface a plugin with blocking I/O has to get right, and which no other
-// example here demonstrates:
+// The networking is incidental. This example shows what a plugin with blocking
+// I/O has to get right:
 //
-//   .data_source()   -> SPC_PLUGIN_DATA_SOURCE: the samples originate OUTSIDE
-//                       the pipeline's dataflow, so the engine records them and
-//                       replays them from the session instead of re-running
-//                       this node. Any source reading a socket, device or file
-//                       needs this or its data cannot be replayed.
+//   .source()     -> SPC_NODE_SOURCE: the samples come from OUTSIDE the
+//                    pipeline, so a recording captures them and replay feeds
+//                    them from the session instead of running this node. Any
+//                    source reading a socket, device or file needs it, or its
+//                    data cannot be replayed.
 //
-//   request_stop()   -> Phase 1 of the two-phase shutdown. The engine calls it
-//                       BEFORE draining the worker, on another thread, while
-//                       process() may be in flight. Set atomic flags and kick
-//                       interrupts only — never free what the worker is reading.
-//                       stop() is Phase 2 and runs after the worker has left
-//                       process(), which is where teardown belongs.
+//   interrupt()   -> Phase 1 of the two-phase shutdown. The engine calls it on
+//                    another thread, BEFORE it waits for the node's thread to
+//                    leave the plugin, so a process() may be running. It sets
+//                    flags and cuts blocking I/O, nothing more: never free what
+//                    process() is reading. stop() is Phase 2 and comes after
+//                    the node's thread has left the plugin, which is where
+//                    teardown belongs.
 //
 // The load-bearing detail is in process(): the wait on the socket is BOUNDED.
-// Do not rely on closing or shutting down a socket to wake a blocked call —
+// Do not rely on closing or shutting down a socket to wake a blocked call:
 // POSIX close() does not wake a blocked accept(), and Winsock shutdown() does
-// not reliably wake a blocked recv(). A plugin that parks forever in recv() and
-// trusts stop() to free it will hang engine shutdown, because the engine waits
-// for the worker to leave process() before calling stop(). Bounding the wait is
-// what makes shutdown terminate; request_stop() then makes it prompt rather
-// than costing one full timeout.
+// not reliably wake a blocked recv(). A plugin that parks in recv() and trusts
+// stop() to free it hangs engine shutdown, because the engine waits for
+// process() to return before it calls stop(). Bounding the wait is what makes
+// shutdown terminate; interrupt() makes it prompt rather than cost one timeout.
 //
 // Try it with:  echo "42.5" | nc -u -w0 127.0.0.1 9100
 
+#include <speculor/plugin.h>
 #include <speculor/plugin_helpers.h>
 
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 
 #if defined(_WIN32)
 #  include <winsock2.h>
@@ -59,17 +60,29 @@ constexpr socket_t kInvalidSocket = -1;
 // latency budget, not a tuning knob.
 constexpr int kPollTimeoutMs = 200;
 
-struct Params {
-    int listen_port = 9100;
+// The parameters, in declaration order: values[P_...] is that parameter's value.
+enum Param : uint32_t {
+    P_LISTEN_PORT,
 };
 
-struct UdpScalarSourceState {
-    spc::HostServices host;
-    spc::SharedParams<Params> params;
+SPC_PLUGIN_DESCRIPTOR(
+    spc::DescriptorBuilder("udp_scalar_source", "UDP Scalar Source", "Sources/General")
+        .source()
+        .author("Speculor").version("0.1.0")
+        .help("Receives newline-terminated numbers over UDP and outputs the latest. "
+              "Demonstrates a source with two-phase shutdown and a bounded wait.")
+        .maturity(SPC_MATURITY_PREVIEW)
+        .tags({"common"})
+        .int_param("listen_port", "Listen Port", 1, 65535, 9100, 1, "Network")
+            .param_help("UDP port to bind and receive datagrams on")
+        .output("scalar_out", "Scalar", SPC_DATA_SCALAR)
+)
 
+struct UdpScalarSourceState {
+    SpcLogContext log{};   // the host's log; the host stays valid until stop() returns
     socket_t sock = kInvalidSocket;
-    // Written by request_stop() on an arbitrary thread, read by process() on
-    // the worker — hence atomic, and hence flags only.
+    // Written by interrupt() on another thread while process() may be
+    // running: hence atomic, and hence a flag only.
     std::atomic<bool> stopping{false};
     float last_value = 0.0f;
 #if defined(_WIN32)
@@ -77,99 +90,82 @@ struct UdpScalarSourceState {
 #endif
 };
 
-SPC_PLUGIN(UdpScalarSourceState, host)
-
-SPC_PLUGIN_DESCRIPTOR(
-    spc::DescriptorBuilder("udp_scalar_source", "UDP Scalar Source", "Sources/General")
-        .data_source()
-        .author("Speculor").version("0.1.0")
-        .description("Receives newline-terminated numbers over UDP and outputs the latest. "
-                     "Demonstrates data_source + two-phase shutdown with a bounded wait.")
-        .maturity(SPC_MATURITY_PREVIEW)
-        .tags({"common"})
-        .int_param("listen_port", "Listen Port", 1, 65535, 9100, 1, "Network")
-            .param_description("UDP port to bind and receive datagrams on")
-        .output("scalar_out", "Scalar", SPC_DATA_SCALAR)
-)
-
-static int set_parameter(SpcPluginInstance* inst, const char* name,
-                         const SpcParameterDesc* value) {
-    bool matched = state(inst)->params.update([&](Params& p) {
-        return spc::try_set_int(name, value, "listen_port", p.listen_port);
-    });
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
+static UdpScalarSourceState* state(SpcPluginInstance* instance)
+{
+    return reinterpret_cast<UdpScalarSourceState*>(instance);
 }
 
-static int start(SpcPluginInstance* inst)
+// Phase 2 of shutdown, and the undo of a start() that fails part way: nothing
+// of the plugin is running any more.
+static void close_and_free(UdpScalarSourceState* s)
 {
-    auto* s = state(inst);
-    const Params p = s->params.snapshot();
-    s->stopping.store(false, std::memory_order_release);
+    if (s->sock != kInvalidSocket) spc_close_sock(s->sock);
+#if defined(_WIN32)
+    if (s->wsa_started) WSACleanup();
+#endif
+    delete s;
+}
+
+// The port is bound here, once. There is no params_changed: the host keeps a
+// value set while the node runs, and the next start() gets it.
+static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)
+{
+    auto* s = new (std::nothrow) UdpScalarSourceState{};
+    if (!s) return nullptr;
+    s->log = spc::log_context(host);   // a convenience over host->log, for the SPC_LOG_* macros
+    const int port = values[P_LISTEN_PORT].i;
 
 #if defined(_WIN32)
     WSADATA wsa;
-    if (!s->wsa_started && WSAStartup(MAKEWORD(2, 2), &wsa) == 0) s->wsa_started = true;
+    s->wsa_started = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
 #endif
 
     s->sock = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (s->sock == kInvalidSocket) {
-        SPC_LOG_ERROR(&s->host.cached_log, "UDP Scalar Source: socket() failed");
-        return SPC_ERR;
+        SPC_LOG_ERROR(&s->log, "UDP Scalar Source: socket() failed");
+        close_and_free(s);
+        return nullptr;   // the node does not run, and stop() is not called
     }
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port        = htons(static_cast<uint16_t>(p.listen_port));
+    addr.sin_port        = htons(static_cast<uint16_t>(port));
     if (::bind(s->sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        SPC_LOG_ERROR(&s->host.cached_log,
-                      "UDP Scalar Source: bind to port %d failed", p.listen_port);
-        spc_close_sock(s->sock);
-        s->sock = kInvalidSocket;
-        return SPC_ERR;
+        SPC_LOG_ERROR(&s->log, "UDP Scalar Source: bind to port %d failed", port);
+        close_and_free(s);
+        return nullptr;
     }
 
-    SPC_LOG_INFO(&s->host.cached_log, "UDP Scalar Source listening on port %d", p.listen_port);
-    return SPC_OK;
+    SPC_LOG_INFO(&s->log, "UDP Scalar Source listening on port %d", port);
+    return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
-// Phase 1. Runs on a thread other than the worker, concurrently with an
-// in-flight process(). Flags and interrupts only — closing the socket here
-// would pull it out from under a recvfrom() the worker is inside.
-static int request_stop(SpcPluginInstance* inst)
+// Phase 1, on a thread other than the node's, while a process() may be in
+// flight. Closing the socket here would pull it out from under a recvfrom()
+// that process() is inside.
+static void interrupt(SpcPluginInstance* instance)
 {
-    state(inst)->stopping.store(true, std::memory_order_release);
-    return SPC_OK;
+    state(instance)->stopping.store(true, std::memory_order_release);
 }
 
-// Phase 2. The worker has left process(), so tearing down is safe.
-static int stop(SpcPluginInstance* inst)
+// Phase 2: the node's thread has left the plugin, so tearing down is safe.
+static void stop(SpcPluginInstance* instance)
 {
-    auto* s = state(inst);
-    if (s->sock != kInvalidSocket) {
-        spc_close_sock(s->sock);
-        s->sock = kInvalidSocket;
-    }
-#if defined(_WIN32)
-    if (s->wsa_started) { WSACleanup(); s->wsa_started = false; }
-#endif
-    return SPC_OK;   // must be idempotent: the engine may stop an already-stopped node
+    close_and_free(state(instance));
 }
 
-static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/,
-                   uint32_t /*input_count*/, SpcData* outputs,
-                   uint32_t output_count)
+static int process(SpcPluginInstance* instance, SpcStep* step)
 {
-    auto* s = state(inst);
-    if (output_count < 1) return SPC_ERR_INVALID;
+    auto* s = state(instance);
 
-    if (s->sock != kInvalidSocket && !s->stopping.load(std::memory_order_acquire)) {
+    if (!s->stopping.load(std::memory_order_acquire)) {
         pollfd pfd{};
         pfd.fd     = s->sock;
         pfd.events = POLLIN;
 
         // The bounded timeout is the point. On expiry we fall through and emit
-        // the previous value; the engine gets its tick either way and shutdown
+        // the previous value; the engine gets its step either way and shutdown
         // can never wait longer than this.
         if (spc_poll(&pfd, 1, kPollTimeoutMs) > 0 && (pfd.revents & POLLIN)) {
             char buf[64];
@@ -183,18 +179,21 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/,
         }
     }
 
-    spc::set_scalar_output(outputs[0], s->last_value);
+    SpcData& out = step->outputs[0];
+    out.type = SPC_DATA_SCALAR;
+    out.scalar = {};   // timestamp_ns and sequence 0: the engine stamps them
+    out.scalar.type = SPC_FIELD_FLOAT;
+    out.scalar.f32 = s->last_value;
     return SPC_OK;
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .process           = process,
-    .start             = start,
-    .stop              = stop,
-    .set_host_services = set_host_services,
-    .request_stop      = request_stop
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi       = SPC_ABI,
+    .info      = get_descriptor,
+    .start     = start,
+    .stop      = stop,
+    .process   = process,
+    .interrupt = interrupt,
+};
+}

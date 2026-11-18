@@ -39,7 +39,7 @@ public:
     bool prepare(VulkanContext &ctx, uint32_t width, uint32_t height,
                  int num_channels);
 
-    // Engine-driven coalesced submit (Phase 7). Records the per-frame
+    // Engine-driven coalesced submit. Records the per-frame
     // upload + (when ready) compute + download into the supplied secondary
     // cmd buffer and returns without submitting. Handles the 2-frame
     // warmup internally: while frame_count_ < 3, only the rolling-buffer
@@ -64,10 +64,10 @@ public:
 
     VkBuffer input_buffer(int slot) const { return bufs_[slot % 3]; }
 
-    // Byte sizes the plugin passes to the host's edge-ring acquire calls. The
-    // output device buffer + staging are mask_bytes_ (width4*4*height, the
-    // padded packed size the compute writes + the download copies) — same
-    // allocation as the prior plugin-owned bufs_[4] / staging_out_.
+    // Byte sizes the plugin passes to the ring calls of the engine's
+    // SpcGpuPass. The output device buffer + staging are mask_bytes_
+    // (width4*4*height, the padded packed size the compute writes + the
+    // download copies).
     VkDeviceSize input_device_size() const { return frame_bytes_; }
     VkDeviceSize output_device_size() const { return mask_bytes_; }
     VkDeviceSize output_staging_size() const { return mask_bytes_; }
@@ -93,9 +93,9 @@ private:
     // 3 frame buffers (rolling, binding 0..2) + 1 mask (binding 3) + 1 output
     // (binding 4). The rolling frame buffers are genuine cross-frame STATE and
     // the mask is a within-frame side input — all stay plugin-owned (single).
-    // bufs_[4] (output) is NO LONGER owned here — it is an engine-owned K-deep
-    // OUTPUT ring slot resolved per-frame from the host. At K=1 it is a single
-    // slot, byte-identical to the prior plugin-owned single output buffer.
+    // bufs_[4] (output) is not owned here: it is the engine's K-deep OUTPUT
+    // ring slot, resolved per frame through the pass. At K=1 it is a single
+    // slot, as a plugin-owned buffer would be.
     static constexpr int NUM_BUFFERS = 5;
     VkBuffer bufs_[NUM_BUFFERS]{};
     VkDeviceMemory mems_[NUM_BUFFERS]{};

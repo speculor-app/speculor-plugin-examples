@@ -10,13 +10,15 @@
 
 A curated set of **real** [Speculor](https://speculor.app) plugins, pulled from
 Speculor's own plugin set and trimmed to the subset that builds against nothing
-but the public SDK bundle. They collectively exercise every `SpcDataType`
-(frame, scalar, signal, table, record, control message) plus GPU compute, the
-event stream (`emit_event`), the host disciplined clock (`spc::clock`), and
-replay-safe / license-gated nodes — and two of them chain into runnable
-pipelines (see README). Built against the
+but the public SDK bundle. They collectively exercise every `SpcDataType` but
+`SPC_DATA_PACKET` (frame, scalar, signal, table, JSON, control) plus GPU
+compute, the event stream (`emit_event`), the host's disciplined clock
+(`host->time`), and replay-safe / license-gated nodes — and two of them chain
+into runnable pipelines (see README). Each one is written against the plugin
+boundary itself, `speculor/plugin.h`, so a reader can match every function in
+it to a slot of `SpcPlugin`. Built against the
 [Speculor SDK bundle](https://github.com/speculor-app/speculor-sdk-dist/releases)
-(source: private `speculor-sdk`).
+(source: private `speculor-sdk`), **SDK 0.58.0** or later (plugin ABI 58).
 
 ## Directory Structure
 
@@ -25,13 +27,13 @@ examples/
   scalar_source/      # SCALAR out — minimal plugin
   pattern_source/     # FRAME out — scrolling gradient test pattern, FPS pacing
   wave_gen/           # SIGNAL out — synthetic waveform, real-time pacing
-  logic_gate/         # SCALAR in -> SCALAR + CONTROL_MSG out — boolean logic
-  system_stats/       # TABLE + RECORD out — cross-platform OS metrics
+  logic_gate/         # SCALAR in -> SCALAR + CONTROL out — boolean logic
+  system_stats/       # TABLE + JSON out — cross-platform OS metrics
   threshold_event/    # SCALAR in -> SpcEvent — emit_event, BEGIN/END spans
-  clock_probe/        # RECORD out — host disciplined clock (spc::clock)
+  clock_probe/        # JSON out — host disciplined clock (host->time)
   uplink_sink/        # SCALAR in -> sink — live_only + license_tier
-  udp_scalar_source/  # SCALAR out — data_source + request_stop, bounded socket wait
-  audio_analyzer/     # SIGNAL in -> TABLE out — take_signals, ring buffer, FFT
+  udp_scalar_source/  # SCALAR out — source + interrupt, bounded socket wait
+  audio_analyzer/     # SIGNAL in -> TABLE out — take_signal, FFT
   blob_detect/        # FRAME in -> TABLE out — spclib connected components
   bbox_display/       # TABLE + FRAME in -> FRAME out — OpenCV drawing
   wmv_bgs/            # FRAME in -> FRAME out — Vulkan compute BGS + CPU fallback
@@ -96,57 +98,59 @@ application's `plugins/` directory.
 
 - **Namespace**: GPU pipeline code in `spc::gpu::`, shared helpers in `spc::`.
 - **No `using namespace std;`** in headers.
-- **No raw `new`/`delete`** — use RAII, `std::make_unique`, containers.
+- **No raw `new`/`delete`** — use RAII, `std::make_unique`, containers. The one exception is the
+  instance itself, which crosses the C boundary: `start()` allocates it with `new (std::nothrow)`
+  and `stop()` `delete`s it.
 
 ## Examples by SDK Feature
 
 | Example | SDK Features Demonstrated |
 |---------|--------------------------|
-| **scalar_source** | `SPC_PLUGIN()`, `SPC_PLUGIN_DESCRIPTOR()`, auto params, `SPC_DATA_SCALAR` output |
-| **pattern_source** | Frame-pool allocation (`host.acquire_frame()`), FPS pacing, fallback buffer |
-| **wave_gen** | `output_signal()` schema, signal block filled in a host-lent table (`host.table()`), enum params, real-time pacing |
-| **logic_gate** | Multiple scalar inputs, boolean logic, driving other nodes' params from an `SPC_DATA_CONTROL_MSG` output: commands go through the host (`s->host.control(out_port).set_float(name, value)`), never a message the plugin builds |
-| **system_stats** | `output_table()` schema filled in a host-lent table (`host.table()`, `field_offsets`) **and** `SPC_DATA_RECORD` JSON co-output, multi-file plugin, platform libs |
-| **threshold_event** | `SpcEvent` fill + `host.emit_event()`, `SPC_EVENT_BEGIN`/`END` spans + severity, `spc::input_scalar` |
-| **clock_probe** | `spc::clock::get_time()` disciplined clock (`SpcTimeInfo`), `SPC_DATA_RECORD` JSON output, interval pacing |
-| **uplink_sink** | `.live_only()` (`SPC_PLUGIN_LIVE_ONLY`, replay egress safety) + `.license_tier(SPC_LICENSE_PERSONAL)`, pure sink |
-| **udp_scalar_source** | `.data_source()` (`SPC_PLUGIN_DATA_SOURCE`, recordable/replayable ingress), two-phase shutdown via `request_stop` + `stop`, bounded `poll`/`WSAPoll` wait so engine shutdown terminates |
-| **audio_analyzer** | `input_signal()`, `spc::take_signals` in `process()`, `SpcRingBuffer`, FFT (`pocketfft_hdronly.h`), metrics table |
-| **blob_detect** | `SpeculorSDK::spclib` (`connectedBlobDetection`), `output_table()` of bboxes, `.passthrough()` input |
-| **bbox_display** | Consuming a table (`input_table()`, `.optional_fields()`, reading through `field_offsets`), OpenCV drawing via `cv_helpers.h`, `${OpenCV_LIBS}` link |
-| **wmv_bgs** | Vulkan compute (`spc_enable_gpu`, `spc_add_gpu_shaders`), `GpuPipelineBase`, `#ifdef SPC_HAS_VULKAN` CPU fallback via spclib `WeightedMovingVariance` |
+| **scalar_source** | The boundary at its smallest: `start`/`stop`/`process`/`params_changed` written out and exported as `spc_plugin`, parameters by position, `SPC_DATA_SCALAR` output, `.run_on_change()` |
+| **pattern_source** | Frames from the host's pool (`host->frame`), FPS pacing, a frame of the plugin's own when the host lends none |
+| **wave_gen** | `output_signal()` schema, signal blocks filled in tables the host lends (`host->table`), ENUM values (`.choice.index`), real-time pacing, `spc::log_context` |
+| **logic_gate** | Multiple non-blocking scalar inputs, BOOL/ENUM/STRING values, driving other nodes' params from an `SPC_DATA_CONTROL` output: commands go through the host (`host->control`, via `spc::ControlOut`), never a message the plugin builds |
+| **system_stats** | `output_table()` filled in a lent table (`host->table`, `field_offsets`) **and** an `SPC_DATA_JSON` output, multi-file plugin, platform libs |
+| **threshold_event** | `SpcEvent` fill + `host->emit_event`, `SPC_EVENT_BEGIN`/`END` spans + severity, `spc::input_scalar` |
+| **clock_probe** | The disciplined clock (`host->time`, `SpcTimeInfo`), `SPC_DATA_JSON` output, interval pacing |
+| **uplink_sink** | `.live_only()` (`SPC_NODE_LIVE_ONLY`, replay egress safety) + `.license_tier(SPC_LICENSE_PERSONAL)`, pure sink |
+| **udp_scalar_source** | `.source()` (`SPC_NODE_SOURCE`, recordable/replayable ingress), two-phase shutdown (`interrupt`, then `stop`), bounded `poll`/`WSAPoll` wait so engine shutdown terminates, a `start()` that fails with a log line, no `params_changed` |
+| **audio_analyzer** | `input_signal()`, `host->take_signal` in `process()`, signal fields read through `field_offsets`, FFT (`pocketfft_hdronly.h`), metrics table |
+| **blob_detect** | `SpeculorSDK::spclib` (`connectedBlobDetection`), `output_table()` of bboxes, `.gpu_ok()` input (`SPC_INPUT_GPU_OK`), `host->ensure_cpu_data`, `param_rules` |
+| **bbox_display** | Consuming a table (`input_table()`, `.optional_fields()`, reading through `field_offsets`), `host->release_frame` for a frame it does not emit, OpenCV drawing via `cv_helpers.h`, `${OpenCV_LIBS}` link |
+| **wmv_bgs** | `record_gpu` into the engine's command buffer (`SPC_GPU_RECORDED`, the `SpcGpuPass` rings), `spc_enable_gpu`, `spc_add_gpu_shaders`, `GpuPipelineBase`, `#ifdef SPC_HAS_VULKAN` CPU path via spclib `WeightedMovingVariance` |
 
-## Plugin State Macros
+## Plugin Shape
 
-```cpp
-SPC_PLUGIN(StateType, host_field)           // Auto create/destroy/state/set_host_services
-SPC_PLUGIN_CAST(StateType)                  // Manual state casting only
-SPC_PLUGIN_HOST_SERVICES(StateType, field)  // Manual host services injection
-```
-
-## Plugin Export
+The examples write the boundary in `speculor/plugin.h` out. They do not use the SDK's composition layer (`spc::PluginSlots`, `SPC_PLUGIN` / `SPC_PLUGIN_STATE`, `create_instance`, `destroy_instance`, `set_host_services`, `spc::params_by_name`, `spc::HostServices`). In C++, `SPC_EXPORT_PLUGIN` builds the exported struct from that layer, so each example defines it by hand:
 
 ```cpp
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .process           = process,
-    .set_host_services = set_host_services,
-    // add .param_rules / .list_options / .start / .stop /
-    // .on_input_event / .record_gpu as needed — fields must appear in
-    // struct-declaration order
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,    // defined by SPC_PLUGIN_DESCRIPTOR
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+    // .interrupt / .record_gpu / .ui_input / .control_reply / .param_rules /
+    // .list_options as needed — in SpcPlugin's declaration order: info, start,
+    // stop, process, interrupt, params_changed, record_gpu, ui_input,
+    // control_reply, param_rules, list_options
+};
+}
 ```
 
-The host holds every parameter value and answers every read; the plugin is told the values and never asked. `spc::params_by_name` calls `set_parameter(inst, name, value)` once per changed parameter, and once for every parameter before `start()`. Its return value is not looked at: the host has already checked the value against the declared type and range. A parameter greyed out or required because of other values is a `.param_rules` function (`spc::ParamRules`, see `bbox_display`).
+- `static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)` allocates the state, keeps `host` when the plugin calls it, takes the values and returns the instance, or null after logging why (undoing what it made: `stop()` is not called then). `static void stop(SpcPluginInstance*)` tears the instance down and frees it.
+- **Parameters by position.** An `enum Param` of indices next to the declarations; with more than one parameter, a `Params` struct filled by `read_params(values)` in `start()` and `params_changed()`. A STRING value lives only during the call: copy it. The host holds every value and has checked it against the declaration, so the plugin never validates or answers for one. Never change a declared id, default or range: projects save them. A parameter greyed out by other values is a `param_rules` function of the values alone, indexed by the same enum (see `bbox_display`).
+- **Host calls** go through the `SpcHost*` directly where that is one line, null-checked, since a function the host does not provide is null (`host->table ? host->table(host, port, rows) : nullptr`). SDK conveniences only where they do real work: `SPC_PLUGIN_DESCRIPTOR` / `DescriptorBuilder`, `spc::log_context` + `SPC_LOG_*`, `spc::ControlOut`, the table accessors, the GPU helpers. Say in one comment, where a convenience is first used, which host call it wraps.
+- **Threads.** The engine calls an instance one call at a time (interrupt aside), so its state needs no lock. `interrupt` sets flags and cuts blocking I/O only. `param_rules` and `list_options` take no instance.
 
 ## Tables
 
-A table or signal output comes from the host: `s->host.table(output, rows)` lends a zeroed table of that output port's schema, valid until `process()` returns. Fill it, set its header (`timestamp_ns`, `frame_number`, and `sample_rate_hz` on a signal), and put it in `outputs[]`; the host publishes it with no copy. A new one is acquired every call. It may have its `record_count` lowered and must not be kept, resized or freed. Do not keep an `SpcTable` member with `spc_table_init` / `spc_table_resize`.
+A table or signal output comes from the host: `host->table(host, output, rows)` lends a zeroed table of that output port's schema, valid until `process()` returns. Fill it, set its header (`timestamp_ns`, `sequence`, and `sample_rate_hz` on a signal), and put it in the step's outputs; the host publishes it with no copy. A new one is lent every call. It may have its `record_count` lowered and must not be kept, resized or freed. Do not keep an `SpcTable` member with `spc_table_init` / `spc_table_resize`.
 
-Every table carries `field_offsets`. On a lent table it has one entry per field of the output port. On an input table it has one entry per field the input port declares, in declaration order: the `input_table()` fields, then the `.optional_fields({...})` ones, whose entry is `SPC_NO_FIELD` when the producer sends no field of that name and type. Declare every field the plugin reads and index `field_offsets` with an enum in the same order; never call `spc_schema_field_offset` on an input table.
+Every table carries `field_offsets`. On a lent table it has one entry per field of the output port. On an input table it has one entry per field the input port declares, in declaration order: the `input_table()` fields, then the `.optional_fields({...})` ones, whose entry is `SPC_NO_FIELD` when the producer sends no field of that id and type. Declare every field the plugin reads and index `field_offsets` with an enum in the same order; never call `spc_schema_field_offset` on an input table.
 
 ## CI
 
@@ -158,7 +162,7 @@ The weekly drift run is what makes it useful: it builds against whatever bundle
 is current, so an SDK release that breaks these examples surfaces here rather
 than in someone else's project. Conformance extends that from "still compiles"
 to "still loads and honours the ABI" — a header change can keep every example
-compiling while breaking the vtable the host actually reads.
+compiling while breaking the `SpcPlugin` the host actually reads.
 
 ## Key Files
 

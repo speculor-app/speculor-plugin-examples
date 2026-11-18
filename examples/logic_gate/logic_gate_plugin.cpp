@@ -1,47 +1,40 @@
+// Boolean logic over up to four scalar inputs, with a CONTROL output that sets
+// a parameter on the nodes wired to it when the result changes. The commands
+// go through the host, which delivers them once process() returns.
+
+#include <speculor/plugin.h>
 #include <speculor/plugin_helpers.h>
 
-#include <cstring>
+#include <new>
 
-// --- state ---
-
-// GUI-thread-set parameters, snapshotted on the worker (H6)
-struct Params
-{
-    int32_t function = 0;       // 0=AND, 1=OR, 2=XOR, 3=NAND, 4=NOR, 5=MAJORITY, 6=THRESHOLD
-    int32_t input_count = 2;    // 2-4 active inputs
-    int32_t threshold = 2;      // for THRESHOLD mode: at least N inputs true
-    int32_t invert_0 = 0;
-    int32_t invert_1 = 0;
-    int32_t invert_2 = 0;
-    int32_t invert_3 = 0;
-    int32_t edge_mode = 0;      // 0=level, 1=rising, 2=falling, 3=both
-    char cmd_param[SPC_PARAM_STRING_MAX] = "";
-    float cmd_true_value = 1.0f;
-    float cmd_false_value = 0.0f;
+// The parameters, in declaration order: values[P_...] is that parameter's value.
+enum Param : uint32_t {
+    P_FUNCTION,
+    P_INPUT_COUNT,
+    P_THRESHOLD,
+    P_INVERT_0,
+    P_INVERT_1,
+    P_INVERT_2,
+    P_INVERT_3,
+    P_EDGE_MODE,
+    P_CMD_PARAM,
+    P_CMD_TRUE_VALUE,
+    P_CMD_FALSE_VALUE,
 };
 
-struct LogicGateState
-{
-    spc::HostServices host;
-
-    // cross-thread parameter block (GUI writes, worker snapshots per frame)
-    spc::SharedParams<Params> params;
-
-    // runtime state
-    bool last_values[4] = {};   // last-seen per-input values (for stale non-blocking inputs)
-    bool prev_result = false;
-    bool has_prev = false;
+// the output ports, in declaration order
+enum Output : uint32_t {
+    OUT_RESULT,
+    OUT_CMD,
 };
-
-SPC_PLUGIN(LogicGateState, host)
 
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("logic_gate", "Logic Gate", "Automation/Logic")
         .author("Speculor").version("0.1.0")
-        .description("Boolean logic operations on up to 4 scalar inputs. Combines alert "
-                      "outputs using AND, OR, XOR, NAND, NOR, MAJORITY, or THRESHOLD. "
-                      "Emits a control message on rising/falling edges to automate "
-                      "parameters on other nodes.")
+        .help("Boolean logic operations on up to 4 scalar inputs. Combines alert "
+              "outputs using AND, OR, XOR, NAND, NOR, MAJORITY, or THRESHOLD. "
+              "Emits a control message on rising/falling edges to automate "
+              "parameters on other nodes.")
         .maturity(SPC_MATURITY_PREVIEW)
         .tags({"common"})
         // inputs — all non-blocking so unused inputs don't stall
@@ -51,16 +44,16 @@ SPC_PLUGIN_DESCRIPTOR(
         .input("in_3", "Input 3", SPC_DATA_SCALAR, 4, SPC_CONSUME_NON_BLOCKING)
         // outputs
         .output("result", "Result", SPC_DATA_SCALAR)
-        .output("cmd_out", "Param Command", SPC_DATA_CONTROL_MSG)
+        .output("cmd_out", "Param Command", SPC_DATA_CONTROL)
         // logic function
         .enum_param("function", "Function",
                     {"AND", "OR", "XOR", "NAND", "NOR", "MAJORITY", "THRESHOLD"},
                     0, "Logic")
-        .param_description("Logic operation to apply to the active inputs")
+        .param_help("Logic operation to apply to the active inputs")
         .int_param("input_count", "Active Inputs", 2, 4, 2, 1, "Logic")
-        .param_description("Number of input ports to evaluate (unused inputs read as false)")
+        .param_help("Number of input ports to evaluate (unused inputs read as false)")
         .int_param("threshold", "Threshold Count", 1, 4, 2, 1, "Logic")
-        .param_description("Minimum number of true inputs required (THRESHOLD mode only)")
+        .param_help("Minimum number of true inputs required (THRESHOLD mode only)")
         // per-input invert
         .bool_param("invert_0", "Invert Input 0", false, "Invert")
         .bool_param("invert_1", "Invert Input 1", false, "Invert")
@@ -70,57 +63,84 @@ SPC_PLUGIN_DESCRIPTOR(
         .enum_param("edge_mode", "Edge Mode",
                     {"Level (continuous)", "Rising Edge", "Falling Edge", "Both Edges"},
                     0, "Output")
-        .param_description("When to emit the control message: continuously, or only on transitions")
+        .param_help("When to emit the control message: continuously, or only on transitions")
         // control message
         .string_param("cmd_param", "Target Param", "", "Param Command")
-        .param_description("Parameter name to set on downstream node (empty = disabled)")
+        .param_help("Parameter name to set on downstream node (empty = disabled)")
         .float_param("cmd_true_value", "True Value", -1e6f, 1e6f, 1.0f, 0.1f, "Param Command")
-        .param_description("Value sent when result becomes true")
+        .param_help("Value sent when result becomes true")
         .float_param("cmd_false_value", "False Value", -1e6f, 1e6f, 0.0f, 0.1f, "Param Command")
-        .param_description("Value sent when result becomes false")
+        .param_help("Value sent when result becomes false")
 )
 
-static int set_parameter(SpcPluginInstance* inst, const char* name,
-                         const SpcParameterDesc* value)
+struct Params
 {
-    bool matched = state(inst)->params.update([&](Params& p) {
-        return spc::try_set_enum  (name, value, "function", p.function)
-            || spc::try_set_int   (name, value, "input_count", p.input_count)
-            || spc::try_set_int   (name, value, "threshold", p.threshold)
-            || spc::try_set_bool  (name, value, "invert_0", p.invert_0)
-            || spc::try_set_bool  (name, value, "invert_1", p.invert_1)
-            || spc::try_set_bool  (name, value, "invert_2", p.invert_2)
-            || spc::try_set_bool  (name, value, "invert_3", p.invert_3)
-            || spc::try_set_enum  (name, value, "edge_mode", p.edge_mode)
-            || spc::try_set_string(name, value, "cmd_param", p.cmd_param)
-            || spc::try_set_float (name, value, "cmd_true_value", p.cmd_true_value)
-            || spc::try_set_float (name, value, "cmd_false_value", p.cmd_false_value);
-    });
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
+    int32_t function;       // 0=AND, 1=OR, 2=XOR, 3=NAND, 4=NOR, 5=MAJORITY, 6=THRESHOLD
+    int32_t input_count;    // 2-4 active inputs
+    int32_t threshold;      // for THRESHOLD mode: at least N inputs true
+    int32_t invert[4];
+    int32_t edge_mode;      // 0=level, 1=rising, 2=falling, 3=both
+    char cmd_param[SPC_PARAM_STRING_MAX];
+    float cmd_true_value;
+    float cmd_false_value;
+};
+
+static Params read_params(const SpcValue* values)
+{
+    Params p;
+    p.function    = values[P_FUNCTION].choice.index;   // ENUM: the position of the option
+    p.input_count = values[P_INPUT_COUNT].i;
+    p.threshold   = values[P_THRESHOLD].i;
+    for (uint32_t i = 0; i < 4; ++i)
+        p.invert[i] = values[P_INVERT_0 + i].i;          // BOOL: 0 or 1 in .i
+    p.edge_mode   = values[P_EDGE_MODE].choice.index;
+    // a STRING value is the host's and lives only during the call: copy it
+    spc::copy_str(p.cmd_param, sizeof(p.cmd_param), values[P_CMD_PARAM].str.ptr);
+    p.cmd_true_value  = values[P_CMD_TRUE_VALUE].f;
+    p.cmd_false_value = values[P_CMD_FALSE_VALUE].f;
+    return p;
 }
 
-// --- lifecycle ---
-
-static int start(SpcPluginInstance* inst)
+struct LogicGateState
 {
-    auto* s = state(inst);
-    const Params p = s->params.snapshot();
-    for (auto& v : s->last_values) v = false;
-    s->prev_result = false;
-    s->has_prev = false;
-    SPC_LOG_INFO(&s->host.cached_log, "Logic Gate started (function=%d, inputs=%d)",
-                 p.function, p.input_count);
-    return 0;
+    SpcHost* host = nullptr;    // valid until stop() returns
+    SpcLogContext log{};
+    Params params{};
+
+    bool last_values[4] = {};   // last-seen per-input values (for stale non-blocking inputs)
+    bool prev_result = false;
+    bool has_prev = false;
+};
+
+static LogicGateState* state(SpcPluginInstance* instance)
+{
+    return reinterpret_cast<LogicGateState*>(instance);
 }
 
-static int stop(SpcPluginInstance* inst)
+static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)
 {
-    auto* s = state(inst);
-    SPC_LOG_INFO(&s->host.cached_log, "Logic Gate stopped");
-    return 0;
+    auto* s = new (std::nothrow) LogicGateState{};
+    if (!s) return nullptr;
+    s->host = host;
+    s->log = spc::log_context(host);   // a convenience over host->log, for the SPC_LOG_* macros
+    s->params = read_params(values);
+    SPC_LOG_INFO(&s->log, "Logic Gate started (function=%d, inputs=%d)",
+                 s->params.function, s->params.input_count);
+    return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
-// --- evaluate ---
+static void stop(SpcPluginInstance* instance)
+{
+    auto* s = state(instance);
+    SPC_LOG_INFO(&s->log, "Logic Gate stopped");
+    delete s;
+}
+
+static void params_changed(SpcPluginInstance* instance, const SpcValue* values,
+                           uint64_t /*changed*/)
+{
+    state(instance)->params = read_params(values);
+}
 
 static bool evaluate(const Params& p, const bool* inputs, int n)
 {
@@ -132,55 +152,50 @@ static bool evaluate(const Params& p, const bool* inputs, int n)
         case 0: return true_count == n;                             // AND
         case 1: return true_count > 0;                              // OR
         case 2: return (true_count % 2) == 1;                       // XOR
-        case 3: return true_count < n;                               // NAND
-        case 4: return true_count == 0;                              // NOR
-        case 5: return true_count > n / 2;                           // MAJORITY (strict)
-        case 6: return true_count >= p.threshold;                    // THRESHOLD
+        case 3: return true_count < n;                              // NAND
+        case 4: return true_count == 0;                             // NOR
+        case 5: return true_count > n / 2;                          // MAJORITY (strict)
+        case 6: return true_count >= p.threshold;                   // THRESHOLD
         default: return false;
     }
 }
 
-// --- process ---
-
-static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t input_count,
-                   SpcData* outputs, uint32_t output_count)
+static int process(SpcPluginInstance* instance, SpcStep* step)
 {
-    auto* s = state(inst);
-    const Params p = s->params.snapshot();  // one consistent view per frame
+    auto* s = state(instance);
+    const Params& p = s->params;
+    const SpcData* inputs = step->inputs;
 
-    // read inputs — non-blocking, so missing inputs keep their last value
-    const int32_t invert[4] = {p.invert_0, p.invert_1, p.invert_2, p.invert_3};
-    const int n = std::min(p.input_count, static_cast<int32_t>(input_count));
-
+    // Non-blocking inputs: a port with nothing new this step arrives as
+    // SPC_DATA_NONE, and keeps its last value. spc::scalar_as_bool is a
+    // convenience: any scalar type, as a bool.
+    const int n = p.input_count;
     for (int i = 0; i < n; ++i) {
-        if (inputs[i].type == SPC_DATA_SCALAR) {
+        if (inputs[i].type == SPC_DATA_SCALAR)
             s->last_values[i] = spc::scalar_as_bool(inputs[i].scalar);
-        }
-        // else: keep last_values[i] from previous cycle
     }
     // inactive inputs are false
-    for (int i = n; i < 4; ++i) {
+    for (int i = n; i < 4; ++i)
         s->last_values[i] = false;
-    }
 
     bool vals[4];
     for (int i = 0; i < 4; ++i)
-        vals[i] = invert[i] ? !s->last_values[i] : s->last_values[i];
+        vals[i] = p.invert[i] ? !s->last_values[i] : s->last_values[i];
 
-    bool result = evaluate(p, vals, p.input_count);
+    const bool result = evaluate(p, vals, n);
 
     // edge detection
-    bool rising = result && (!s->prev_result || !s->has_prev);
-    bool falling = !result && s->prev_result && s->has_prev;
+    const bool rising = result && (!s->prev_result || !s->has_prev);
+    const bool falling = !result && s->prev_result && s->has_prev;
 
-    if (output_count >= 1) {
-        outputs[0].type = SPC_DATA_SCALAR;
-        outputs[0].scalar.type = SPC_FIELD_INT32;
-        outputs[0].scalar.b = result ? 1 : 0;
-    }
+    SpcData& out = step->outputs[OUT_RESULT];
+    out.type = SPC_DATA_SCALAR;
+    out.scalar = {};   // timestamp_ns and sequence 0: the engine stamps them
+    out.scalar.type = SPC_FIELD_INT32;
+    out.scalar.b = result ? 1 : 0;
 
-    // emit control message based on edge mode
-    if (output_count >= 2 && p.cmd_param[0] != '\0') {
+    // emit a control command based on edge mode
+    if (p.cmd_param[0] != '\0') {
         bool should_emit = false;
         float cmd_value = 0.0f;
 
@@ -201,23 +216,27 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                 break;
         }
 
+        // spc::ControlOut is a convenience over host->control(host, OUT_CMD,
+        // SPC_CONTROL_SET, name, SPC_PARAM_FLOAT, &value, 0): the value goes in
+        // an SpcValue, and request id 0 asks for no reply. The host sends the
+        // command to every node wired to the output once process() returns.
         if (should_emit)
-            s->host.control(1).set_float(p.cmd_param, cmd_value);
+            spc::ControlOut(s->host, OUT_CMD, 0).set_float(p.cmd_param, cmd_value);
     }
 
     s->prev_result = result;
     s->has_prev = true;
 
-    return 0;
+    return SPC_OK;
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .process           = process,
-    .start             = start,
-    .stop              = stop,
-    .set_host_services = set_host_services
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+};
+}

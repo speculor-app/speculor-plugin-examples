@@ -1,50 +1,92 @@
-#include <speculor/plugin_helpers.h>
+// Outputs a constant scalar, set by its one parameter. The smallest plugin:
+// each function below fills a slot of SpcPlugin (speculor/plugin.h), and the
+// struct at the bottom, spc_plugin, is all the library exports.
 
-// GUI-thread-set parameters, snapshotted on the worker (H6)
-struct Params {
-    float value = 0.0f;
+#include <speculor/plugin.h>          // the boundary: every type and call that crosses it
+#include <speculor/plugin_helpers.h>  // conveniences compiled into the plugin
+
+#include <new>
+
+// The parameters in the order the node info declares them. start() and
+// params_changed() get the values as one array in this order, so a value's
+// position is its identity.
+enum Param : uint32_t {
+    P_VALUE,
 };
 
-struct ScalarSourceState {
-    spc::HostServices host;
-    spc::SharedParams<Params> params;
-};
-
-SPC_PLUGIN(ScalarSourceState, host)
-
+// The info slot. SPC_PLUGIN_DESCRIPTOR defines get_descriptor(), which builds
+// the SpcNodeInfo on the first call and keeps it, and all it points at, while
+// the library is loaded. DescriptorBuilder is a convenience for filling it.
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("scalar_source", "Scalar Source", "Sources/General")
-        .static_source()
+        .run_on_change()
         .author("Speculor").version("0.1.0")
-        .description("Outputs a constant scalar value")
+        .help("Outputs a constant scalar value")
         .maturity(SPC_MATURITY_STABLE)
         .tags({"common"})
-        .float_param("value", "Value", -1e6f, 1e6f, 0.0f, 0.1f)
-            .param_description("Constant scalar value to output each frame")
+        .float_param("value", "Value", -1e6f, 1e6f, 0.0f, 0.1f)   // P_VALUE
+            .param_help("Constant scalar value to output each frame")
         .output("scalar_out", "Scalar", SPC_DATA_SCALAR)
 )
 
-static int set_parameter(SpcPluginInstance* inst, const char* name,
-                         const SpcParameterDesc* value) {
-    bool matched = state(inst)->params.update([&](Params& p) {
-        return spc::try_set_float(name, value, "value", p.value);
-    });
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
+// An instance exists only while its node runs. The engine holds it as an
+// opaque SpcPluginInstance* and calls it one call at a time, so it needs no
+// lock.
+struct ScalarSourceState {
+    float value = 0.0f;
+};
+
+static ScalarSourceState* state(SpcPluginInstance* instance)
+{
+    return reinterpret_cast<ScalarSourceState*>(instance);
 }
 
-static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/,
-                   uint32_t /*input_count*/, SpcData* outputs,
-                   uint32_t output_count) {
-    if (output_count < 1) return -1;
-    spc::set_scalar_output(outputs[0], state(inst)->params.snapshot().value);
-    return 0;
+// `values` are the host's, valid during the call. `host` stays valid until
+// stop() returns; this plugin makes no host call, so it does not keep it.
+// Null means the node does not run.
+static SpcPluginInstance* start(SpcHost* /*host*/, const SpcValue* values)
+{
+    auto* s = new (std::nothrow) ScalarSourceState{};
+    if (!s) return nullptr;
+    s->value = values[P_VALUE].f;   // a value is in the member its declared type names: FLOAT is .f
+    return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .process           = process,
-    .set_host_services = set_host_services
-)
+// Nothing is called on the instance after this.
+static void stop(SpcPluginInstance* instance)
+{
+    delete state(instance);
+}
+
+// Every value again, with bit i of `changed` set for each parameter that
+// differs from what this instance last had.
+static void params_changed(SpcPluginInstance* instance, const SpcValue* values,
+                           uint64_t /*changed*/)
+{
+    state(instance)->value = values[P_VALUE].f;
+}
+
+// The step holds one SpcData per declared input and output, in port order.
+static int process(SpcPluginInstance* instance, SpcStep* step)
+{
+    SpcData& out = step->outputs[0];
+    out.type = SPC_DATA_SCALAR;
+    out.scalar = {};   // timestamp_ns and sequence 0: the engine stamps them
+    out.scalar.type = SPC_FIELD_FLOAT;
+    out.scalar.f32 = state(instance)->value;
+    return SPC_OK;
+}
+
+// The one symbol the engine looks up. It loads the plugin only when `abi`
+// equals its own SPC_ABI; a slot left out is null, a call the plugin does
+// without.
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+};
+}

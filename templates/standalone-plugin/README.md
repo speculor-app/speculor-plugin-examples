@@ -26,10 +26,12 @@ The built plugin lands in `build/` as `my_plugin.so` / `my_plugin.dll`. Drop it 
 
 ## What it shows
 
-**Generated parameters.** `SPC_PLUGIN_AUTO_PARAMS` writes `set_parameter` from a binding list, so the bindings *are* the implementation: each value the host tells the plugin is copied into the bound field. The vtable exports it as `.params_changed = spc::params_by_name<get_descriptor, set_parameter>`. The host holds the values and answers every read, so there is nothing to write for reading one. Use it when parameter changes are pure dispatch.
+**The boundary, written out.** Each function in `my_plugin.cpp` fills a slot of `SpcPlugin` from `speculor/plugin.h`, and `spc_plugin` at the bottom is the one symbol the library exports: `start(host, values)` makes the instance when the node starts, `stop()` frees it, `process()` runs one step and `params_changed()` is told new values. To add a slot (`interrupt`, `record_gpu`, `param_rules`, ...), write its function and list it in `spc_plugin`, in `SpcPlugin`'s declaration order; the examples under [`examples/`](../../examples) show those three.
 
-Write `set_parameter` by hand when changing a parameter has to *do* something — reopen a device, resize a buffer, mark state dirty. Every example under `examples/` does it that way; [`blob_detect`](../../examples/blob_detect) is a good reference.
+**Parameters by position.** `start()` and `params_changed()` get every value as one `SpcValue` array in declaration order, and `enum Param` names the positions. The host holds the values and checks each against its declaration, so there is nothing to write for reading or validating one. When changing a parameter has to *do* something — reopen a device, resize a buffer — do it in `params_changed()`, which runs on the node's thread between steps; [`blob_detect`](../../examples/blob_detect) is a good reference.
 
-**Pool-first frame output.** `process()` asks the engine's frame pool first, because a pooled frame is written in place and the engine skips a copy. The pool can be exhausted, so there is a fallback buffer — returning an error there would drop frames under load.
+**Pool-first frame output.** `process()` asks the host for a pool frame first (`host->frame`), because it is written in place and published without a copy. When the host lends none, the plugin uses a buffer of its own, which the engine copies.
 
-**A conformance test, in the same project.** `conformance_runner.cpp` loads the built plugin through its exported `spc_plugin_vtable` and checks it answers the ABI honestly. Keep it: it is the cheapest possible check that your plugin is loadable, and it costs one file. It proves nothing about whether your filter is *correct* — for that, drive the plugin with `FakeHost` and assert on what `process()` produces.
+**A conformance test, in the same project.** `conformance_runner.cpp` loads the built plugin through its exported `spc_plugin` and checks it answers the ABI honestly. Keep it: it is the cheapest possible check that your plugin is loadable, and it costs one file. It proves nothing about whether your filter is *correct* — for that, drive the plugin with `FakeHost` and assert on what `process()` produces.
+
+The template needs SDK 0.58.0 or later.

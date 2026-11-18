@@ -12,7 +12,7 @@
 // the plugin that broke instead of reporting that "the tests" failed.
 //
 // What this proves, and what it does not: conformance loads the plugin the way
-// the host does — through the exported spc_plugin_vtable — and checks it
+// the host does — through the exported spc_plugin — and checks it
 // answers the ABI honestly. It cannot tell whether the plugin does its job.
 // That needs a behavioural test written against your own contract.
 
@@ -32,7 +32,7 @@ int main(int argc, char** argv)
     spc::testing::PluginUnderTest plugin;
     if (!plugin.load(path)) {
         // A plugin that cannot be loaded at all is indistinguishable from one
-        // that exports no vtable, so report the loader's own message.
+        // that exports no spc_plugin, so report the loader's own message.
         std::fprintf(stderr, "FAIL: %s\n", plugin.error().c_str());
         return 1;
     }

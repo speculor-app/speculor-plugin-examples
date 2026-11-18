@@ -1,19 +1,10 @@
+// Samples system statistics once per interval: a one-row TABLE of metrics, and
+// a JSON output with the machine's static description.
+
 #include "system_stats_state.h"
 
+#include <new>
 #include <thread>
-
-SPC_PLUGIN_CAST(SystemStatsState)
-SPC_PLUGIN_HOST_SERVICES(SystemStatsState, host)
-
-static int set_parameter(SpcPluginInstance* inst, const char* name,
-                         const SpcParameterDesc* value)
-{
-    bool matched = state(inst)->params.update([&](Params& p) {
-        return spc::try_set_int   (name, value, "update_interval_sec", p.update_interval_sec)
-            || spc::try_set_string(name, value, "disk_path", p.disk_path);
-    });
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
-}
 
 #ifdef _WIN32
 static constexpr const char* SPC_DEFAULT_DISK_PATH = "C:\\";
@@ -21,14 +12,22 @@ static constexpr const char* SPC_DEFAULT_DISK_PATH = "C:\\";
 static constexpr const char* SPC_DEFAULT_DISK_PATH = "/";
 #endif
 
-// ============================================================================
-// plugin descriptor
-// ============================================================================
+// The parameters, in declaration order: values[P_...] is that parameter's value.
+enum Param : uint32_t {
+    P_UPDATE_INTERVAL_SEC,
+    P_DISK_PATH,
+};
+
+// the output ports, in declaration order
+enum Output : uint32_t {
+    OUT_STATS,
+    OUT_INFO,
+};
 
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("system_stats", "System Stats", "Sources/General")
         .author("Speculor").version("0.1.0")
-        .description("Collects cross-platform system statistics: CPU, memory, disk, network, process info")
+        .help("Collects cross-platform system statistics: CPU, memory, disk, network, process info")
         .maturity(SPC_MATURITY_EXPERIMENTAL)
         .tags({"common"})
         .output_table("stats_out", "System Stats", {
@@ -53,30 +52,34 @@ SPC_PLUGIN_DESCRIPTOR(
             {"uptime_sec",       SPC_FIELD_UINT32},
             {"cpu_freq_mhz",     SPC_FIELD_UINT32},
         })
-        .output("info_out", "System Info", SPC_DATA_RECORD)
+        .output("info_out", "System Info", SPC_DATA_JSON)
         .int_param("update_interval_sec", "Update Interval (sec)", 1, 60, 1, 1, "Sampling")
-            .param_description("Seconds between system statistics samples")
+            .param_help("Seconds between system statistics samples")
         .string_param("disk_path", "Disk Path", SPC_DEFAULT_DISK_PATH, "Disk")
-            .param_description("Filesystem path to monitor for disk usage")
+            .param_help("Filesystem path to monitor for disk usage")
 )
 
-// ============================================================================
-// lifecycle
-// ============================================================================
-
-static SpcPluginInstance* create_instance()
+static Params read_params(const SpcValue* values)
 {
-    return reinterpret_cast<SpcPluginInstance*>(new SystemStatsState{});
+    Params p;
+    p.update_interval_sec = values[P_UPDATE_INTERVAL_SEC].i;
+    // a STRING value lives only during the call that hands it over: copy it
+    spc::copy_str(p.disk_path, sizeof(p.disk_path), values[P_DISK_PATH].str.ptr);
+    return p;
 }
 
-static void destroy_instance(SpcPluginInstance* inst)
+static SystemStatsState* state(SpcPluginInstance* instance)
 {
-    delete state(inst);
+    return reinterpret_cast<SystemStatsState*>(instance);
 }
 
-static int start(SpcPluginInstance* inst)
+static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)
 {
-    auto* s = state(inst);
+    auto* s = new (std::nothrow) SystemStatsState{};
+    if (!s) return nullptr;
+    s->host = host;
+    s->log = spc::log_context(host);   // a convenience over host->log, for the SPC_LOG_* macros
+    s->params = read_params(values);
 
     // collect static info once
     collect_static_info(s);
@@ -91,33 +94,31 @@ static int start(SpcPluginInstance* inst)
     s->prev_net_recv = net.recv;
 
     s->last_emit = std::chrono::steady_clock::now();
-    s->frame_number = 0;
 
-    const Params p = s->params.snapshot();
-    SPC_LOG_INFO(&s->host.cached_log, "System Stats started (interval: %d sec, disk: %s)",
-                 p.update_interval_sec, p.disk_path);
-    return 0;
+    SPC_LOG_INFO(&s->log, "System Stats started (interval: %d sec, disk: %s)",
+                 s->params.update_interval_sec, s->params.disk_path);
+    return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
-static int stop(SpcPluginInstance* inst)
+static void stop(SpcPluginInstance* instance)
 {
-    auto* s = state(inst);
-    SPC_LOG_INFO(&s->host.cached_log, "System Stats stopped (%llu frames emitted)",
-                 static_cast<unsigned long long>(s->frame_number));
-    return 0;
+    auto* s = state(instance);
+    SPC_LOG_INFO(&s->log, "System Stats stopped (%llu frames emitted)",
+                 static_cast<unsigned long long>(s->sequence));
+    delete s;
 }
 
-// ============================================================================
-// process
-// ============================================================================
-
-static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t /*input_count*/,
-                   SpcData* outputs, uint32_t output_count)
+static void params_changed(SpcPluginInstance* instance, const SpcValue* values,
+                           uint64_t /*changed*/)
 {
-    auto* s = state(inst);
-    if (output_count < 2) return -1;
+    state(instance)->params = read_params(values);
+}
 
-    const Params p = s->params.snapshot();  // one consistent view per frame
+static int process(SpcPluginInstance* instance, SpcStep* step)
+{
+    auto* s = state(instance);
+    SpcHost* host = s->host;
+    const Params& p = s->params;
 
     // pacing: sleep until next interval
     auto now = std::chrono::steady_clock::now();
@@ -146,11 +147,13 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     s->prev_net_sent = net.sent;
     s->prev_net_recv = net.recv;
 
-    // --- fill table (single row, lent by the host until process() returns) ---
-    SpcTable* out = s->host.table(0, 1);
-    if (!out) return -1;
+    // --- one row, in a table the host lends until process() returns ---
+    SpcTable* out = host->table ? host->table(host, OUT_STATS, 1) : nullptr;
+    if (!out) return SPC_FAILED;
+    // where each field of the port is in a record, in declaration order
     const uint32_t* off = out->field_offsets;
 
+    // spc_table_set_* (table_helpers.h) write a field at its offset in record 0
     spc_table_set_float(out,  0, off[F_CPU_USAGE_PCT],    cpu_pct);
     spc_table_set_uint32(out, 0, off[F_CPU_CORE_COUNT],   s->core_count);
     spc_table_set_uint32(out, 0, off[F_CPU_THREAD_COUNT], s->thread_count);
@@ -172,14 +175,14 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     spc_table_set_uint32(out, 0, off[F_UPTIME_SEC],       uptime);
     spc_table_set_uint32(out, 0, off[F_CPU_FREQ_MHZ],     s->cpu_freq_mhz);
 
-    out->frame_number = s->frame_number++;
+    out->sequence = s->sequence++;
     out->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
 
-    outputs[0].type = SPC_DATA_TABLE;
-    outputs[0].table = out;
+    step->outputs[OUT_STATS].type = SPC_DATA_TABLE;
+    step->outputs[OUT_STATS].table = out;
 
-    // --- build JSON record ---
+    // --- build the JSON output ---
     // escape backslashes in disk_path for JSON
     std::string escaped_disk;
     for (const char* dp = p.disk_path; *dp; ++dp) {
@@ -187,32 +190,32 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
         else escaped_disk += *dp;
     }
 
-    s->record_json = "{";
-    s->record_json += "\"cpu_name\":\"" + std::string(s->cpu_name) + "\"";
-    s->record_json += ",\"os_name\":\"" + std::string(s->os_name) + "\"";
-    s->record_json += ",\"os_version\":\"" + std::string(s->os_version) + "\"";
-    s->record_json += ",\"hostname\":\"" + std::string(s->hostname) + "\"";
-    s->record_json += ",\"net_interface\":\"" + std::string(s->net_interface) + "\"";
-    s->record_json += ",\"net_type\":\"" + std::string(s->net_type) + "\"";
-    s->record_json += ",\"disk_path\":\"" + escaped_disk + "\"";
-    s->record_json += "}";
+    s->json_text = "{";
+    s->json_text += "\"cpu_name\":\"" + std::string(s->cpu_name) + "\"";
+    s->json_text += ",\"os_name\":\"" + std::string(s->os_name) + "\"";
+    s->json_text += ",\"os_version\":\"" + std::string(s->os_version) + "\"";
+    s->json_text += ",\"hostname\":\"" + std::string(s->hostname) + "\"";
+    s->json_text += ",\"net_interface\":\"" + std::string(s->net_interface) + "\"";
+    s->json_text += ",\"net_type\":\"" + std::string(s->net_type) + "\"";
+    s->json_text += ",\"disk_path\":\"" + escaped_disk + "\"";
+    s->json_text += "}";
 
-    s->output_record.json = s->record_json.c_str();
-    s->output_record.length = static_cast<uint32_t>(s->record_json.size());
+    s->output_json.json = s->json_text.c_str();
+    s->output_json.length = static_cast<uint32_t>(s->json_text.size());
 
-    outputs[1].type = SPC_DATA_RECORD;
-    outputs[1].record = &s->output_record;
+    step->outputs[OUT_INFO].type = SPC_DATA_JSON;
+    step->outputs[OUT_INFO].json = &s->output_json;
 
-    return 0;
+    return SPC_OK;
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .process           = process,
-    .start             = start,
-    .stop              = stop,
-    .set_host_services = set_host_services
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+};
+}

@@ -1,6 +1,10 @@
+// Computes audio metrics (RMS, peak, crest factor, spectral centroid, dominant
+// frequency, zero-crossing rate) over a sliding window of the samples arriving
+// on a SIGNAL input, and outputs them as a one-row TABLE at a set rate.
+
+#include <speculor/plugin.h>
 #include <speculor/plugin_helpers.h>
 #include <speculor/table_helpers.h>
-#include <speculor/ring_buffer.h>
 
 #include <pocketfft_hdronly.h>
 
@@ -8,9 +12,25 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <new>
 #include <numbers>
 #include <thread>
 #include <vector>
+
+// The parameters, in declaration order: values[P_...] is that parameter's value.
+enum Param : uint32_t {
+    P_WINDOW_SIZE,
+    P_SAMPLE_RATE,
+    P_UPDATE_RATE,
+};
+
+// the input ports, in declaration order
+enum Input : uint32_t {
+    IN_SIGNAL,
+};
+
+// signal_in field indices, in the order the input declares them
+enum { F_IN_AMPLITUDE = 0 };
 
 // output schema field indices
 enum {
@@ -23,64 +43,73 @@ enum {
     OUT_FIELD_COUNT
 };
 
-constexpr size_t ring_capacity = 65536;
+SPC_PLUGIN_DESCRIPTOR(
+    spc::DescriptorBuilder("audio_analyzer", "Audio Analyzer", "Analysis/Audio")
+        .author("Speculor").version("0.1.0")
+        .help("Computes audio metrics: RMS, peak, crest factor, spectral centroid, dominant frequency, zero-crossing rate")
+        .maturity(SPC_MATURITY_PREVIEW)
+        .tags({"audio"})
+        .input_signal("signal_in", "Signal In", {
+            {"amplitude", SPC_FIELD_FLOAT},
+        })
+        .output_table("analysis_out", "Analysis", {
+            {"rms_db",               SPC_FIELD_FLOAT},
+            {"peak_db",              SPC_FIELD_FLOAT},
+            {"crest_factor",         SPC_FIELD_FLOAT},
+            {"spectral_centroid_hz", SPC_FIELD_FLOAT},
+            {"dominant_freq_hz",     SPC_FIELD_FLOAT},
+            {"zero_crossing_rate",   SPC_FIELD_FLOAT},
+        })
+        .int_param("window_size", "Window Size", 256, 16384, 4096, 256, "Analysis")
+            .param_help("Number of samples per analysis window")
+        .int_param("sample_rate", "Sample Rate", 8000, 192000, 44100, 1000, "Input")
+            .param_help("Fallback sample rate if not provided by upstream signal")
+        .float_param("update_rate", "Update Rate (Hz)", 1.0f, 60.0f, 10.0f, 1.0f, "Output")
+            .param_help("Maximum analysis output rate in Hz")
+)
 
-// ═══════════════════════════════════════════════════════════════════
-// state
-// ═══════════════════════════════════════════════════════════════════
-
-// GUI-thread-set parameters, snapshotted on the worker (H6)
 struct Params
 {
-    int32_t window_size = 4096;
-    int32_t sample_rate = 44100;
-    float update_rate = 10.0f;
+    int32_t window_size;
+    int32_t sample_rate;
+    float update_rate;
 };
+
+static Params read_params(const SpcValue* values)
+{
+    Params p;
+    p.window_size = values[P_WINDOW_SIZE].i;
+    p.sample_rate = values[P_SAMPLE_RATE].i;
+    p.update_rate = values[P_UPDATE_RATE].f;
+    return p;
+}
 
 struct AudioAnalyzerState
 {
-    spc::HostServices host;
+    SpcHost* host = nullptr;   // valid until stop() returns
+    SpcLogContext log{};
+    Params params{};
 
-    // signal input ring
-    SpcRingBuffer* signal_ring = nullptr;
-
-    // analysis window buffer
+    // the newest samples, circular; sized once, in start()
     std::vector<float> window_buf;
     size_t window_pos = 0;
+    bool fresh = false;        // samples arrived since the last output
 
     // Hann window (precomputed)
     std::vector<float> hann;
-
-    // cross-thread parameter block (GUI writes, worker snapshots per frame)
-    spc::SharedParams<Params> params;
 
     // upstream metadata
     double upstream_sample_rate = 0.0;
 
     // timing
     std::chrono::steady_clock::time_point last_output_time;
-    uint64_t frame_number = 0;
+    uint64_t sequence = 0;
 };
 
-SPC_PLUGIN_CAST(AudioAnalyzerState)
-SPC_PLUGIN_HOST_SERVICES(AudioAnalyzerState, host)
-
-// ═══════════════════════════════════════════════════════════════════
-// signal handler (process() calls it with each block waiting)
-// ═══════════════════════════════════════════════════════════════════
-
-static int on_signal_handler(AudioAnalyzerState* s, uint32_t port_index, const SpcTable* data)
+static AudioAnalyzerState* state(SpcPluginInstance* instance)
 {
-    if (port_index != 0) return -1;
-    spc_ring_write(s->signal_ring, data->data, data->record_count);
-    if (data->sample_rate_hz > 0.0)
-        s->upstream_sample_rate = data->sample_rate_hz;
-    return 0;
+    return reinterpret_cast<AudioAnalyzerState*>(instance);
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// Hann window precomputation
-// ═══════════════════════════════════════════════════════════════════
 
 static void precompute_hann(AudioAnalyzerState* s, size_t n)
 {
@@ -99,114 +128,64 @@ static size_t next_pow2(size_t v)
     return p;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// descriptor
-// ═══════════════════════════════════════════════════════════════════
-
-SPC_PLUGIN_DESCRIPTOR(
-    spc::DescriptorBuilder("audio_analyzer", "Audio Analyzer", "Analysis/Audio")
-        .author("Speculor").version("0.1.0")
-        .description("Computes audio metrics: RMS, peak, crest factor, spectral centroid, dominant frequency, zero-crossing rate")
-        .maturity(SPC_MATURITY_PREVIEW)
-        .tags({"audio"})
-        .input_signal("signal_in", "Signal In", {
-            {"amplitude", SPC_FIELD_FLOAT},
-        })
-        .output_table("analysis_out", "Analysis", {
-            {"rms_db",               SPC_FIELD_FLOAT},
-            {"peak_db",              SPC_FIELD_FLOAT},
-            {"crest_factor",         SPC_FIELD_FLOAT},
-            {"spectral_centroid_hz", SPC_FIELD_FLOAT},
-            {"dominant_freq_hz",     SPC_FIELD_FLOAT},
-            {"zero_crossing_rate",   SPC_FIELD_FLOAT},
-        })
-        .int_param("window_size", "Window Size", 256, 16384, 4096, 256, "Analysis")
-            .param_description("Number of samples per analysis window")
-        .int_param("sample_rate", "Sample Rate", 8000, 192000, 44100, 1000, "Input")
-            .param_description("Fallback sample rate if not provided by upstream signal")
-        .float_param("update_rate", "Update Rate (Hz)", 1.0f, 60.0f, 10.0f, 1.0f, "Output")
-            .param_description("Maximum analysis output rate in Hz")
-)
-
-// ═══════════════════════════════════════════════════════════════════
-// lifecycle
-// ═══════════════════════════════════════════════════════════════════
-
-static SpcPluginInstance* create_instance()
+static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)
 {
-    auto* s = new AudioAnalyzerState{};
-    s->signal_ring = spc_ring_create(ring_capacity, sizeof(float));
-    s->window_buf.resize(4096, 0.0f);
-    precompute_hann(s, 4096);
-    return reinterpret_cast<SpcPluginInstance*>(s);
-}
-
-static void destroy_instance(SpcPluginInstance* inst)
-{
-    auto* s = state(inst);
-    spc_ring_destroy(s->signal_ring);
-    delete s;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// parameters
-// ═══════════════════════════════════════════════════════════════════
-
-static int set_parameter(SpcPluginInstance* inst, const char* name,
-                         const SpcParameterDesc* value)
-{
-    bool matched = state(inst)->params.update([&](Params& p) {
-        return spc::try_set_int  (name, value, "window_size", p.window_size)
-            || spc::try_set_int  (name, value, "sample_rate", p.sample_rate)
-            || spc::try_set_float(name, value, "update_rate", p.update_rate);
-    });
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// streaming
-// ═══════════════════════════════════════════════════════════════════
-
-static int start(SpcPluginInstance* inst)
-{
-    auto* s = state(inst);
-    const Params p = s->params.snapshot();
-    spc_ring_reset(s->signal_ring);
-    s->window_pos = 0;
-    s->frame_number = 0;
-    s->upstream_sample_rate = 0.0;
+    auto* s = new (std::nothrow) AudioAnalyzerState{};
+    if (!s) return nullptr;
+    s->host = host;
+    s->log = spc::log_context(host);   // a convenience over host->log, for the SPC_LOG_* macros
+    s->params = read_params(values);
     s->last_output_time = std::chrono::steady_clock::now();
 
-    auto ws = static_cast<size_t>(std::clamp(p.window_size, 256, 16384));
+    // the window is sized once: a new size takes effect at the next start
+    auto ws = static_cast<size_t>(std::clamp(s->params.window_size, 256, 16384));
     s->window_buf.assign(ws, 0.0f);
     precompute_hann(s, ws);
 
-    SPC_LOG_INFO(&s->host.cached_log, "Audio Analyzer started (window=%d)", p.window_size);
-    return 0;
+    SPC_LOG_INFO(&s->log, "Audio Analyzer started (window=%d)", s->params.window_size);
+    return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
-static int stop(SpcPluginInstance* inst)
+static void stop(SpcPluginInstance* instance)
 {
-    auto* s = state(inst);
-    SPC_LOG_INFO(&s->host.cached_log, "Audio Analyzer stopped (%llu frames output)",
-                 static_cast<unsigned long long>(s->frame_number));
-    return 0;
+    auto* s = state(instance);
+    SPC_LOG_INFO(&s->log, "Audio Analyzer stopped (%llu frames output)",
+                 static_cast<unsigned long long>(s->sequence));
+    delete s;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// process
-// ═══════════════════════════════════════════════════════════════════
-
-static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t /*input_count*/,
-                   SpcData* outputs, uint32_t output_count)
+static void params_changed(SpcPluginInstance* instance, const SpcValue* values,
+                           uint64_t /*changed*/)
 {
-    auto* s = state(inst);
-    spc::take_signals(s->host, get_descriptor(), [s](uint32_t port, const SpcTable* block) {
-        on_signal_handler(s, port, block);
-    });
-    if (output_count < 1) return -1;
+    state(instance)->params = read_params(values);
+}
 
-    const Params p = s->params.snapshot();  // one consistent view per frame
+static int process(SpcPluginInstance* instance, SpcStep* step)
+{
+    auto* s = state(instance);
+    SpcHost* host = s->host;
+    const Params& p = s->params;
+    const size_t ws = s->window_buf.size();
+
+    // The blocks sent to the signal input wait with the host, which copied
+    // them, until the node takes them here, on its own thread. Each is valid
+    // until the next take on the same port. (The input's slot in the step is
+    // always SPC_DATA_NONE.)
+    if (host->take_signal) {
+        while (const SpcTable* block = host->take_signal(host, IN_SIGNAL)) {
+            // where `amplitude` is in this producer's records: field_offsets
+            // has one entry per field the input declares, and
+            // spc_table_get_float (table_helpers.h) reads it there
+            const uint32_t off = block->field_offsets[F_IN_AMPLITUDE];
+            for (uint32_t i = 0; i < block->record_count; ++i) {
+                s->window_buf[s->window_pos] = spc_table_get_float(block, i, off);
+                s->window_pos = (s->window_pos + 1) % ws;
+            }
+            if (block->record_count > 0) s->fresh = true;
+            if (block->sample_rate_hz > 0.0)
+                s->upstream_sample_rate = block->sample_rate_hz;
+        }
+    }
 
     // rate limiting
     auto now = std::chrono::steady_clock::now();
@@ -215,27 +194,14 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
         std::chrono::duration<double>(1.0 / static_cast<double>(rate)));
     if (now < s->last_output_time + interval) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        return 0;
+        return SPC_OK;
     }
 
-    float drain[8192];
-    size_t ws = s->window_buf.size();
-    bool window_ready = false;
-
-    for (;;) {
-        uint32_t n = spc_ring_read(s->signal_ring, drain, 8192);
-        if (n == 0) break;
-        for (uint32_t i = 0; i < n; ++i) {
-            s->window_buf[s->window_pos] = drain[i];
-            s->window_pos = (s->window_pos + 1) % ws;
-        }
-        window_ready = true;
-    }
-
-    if (!window_ready) {
+    if (!s->fresh) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        return 0;
+        return SPC_OK;
     }
+    s->fresh = false;
 
     double sr = (s->upstream_sample_rate > 0.0) ? s->upstream_sample_rate
                                                 : static_cast<double>(p.sample_rate);
@@ -296,8 +262,8 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     float dominant_freq = static_cast<float>(max_bin) * bin_resolution;
 
     // one row in a table the host lends for output 0, valid until process() returns
-    SpcTable* out = s->host.table(0, 1);
-    if (!out) return -1;
+    SpcTable* out = host->table ? host->table(host, 0, 1) : nullptr;
+    if (!out) return SPC_FAILED;
     const uint32_t* off = out->field_offsets;
 
     spc_table_set_float(out, 0, off[F_RMS_DB], rms_db);
@@ -308,24 +274,24 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     spc_table_set_float(out, 0, off[F_ZERO_CROSSING_RATE], zcr);
 
     out->sample_rate_hz = sr;
-    out->frame_number = s->frame_number++;
+    out->sequence = s->sequence++;
     out->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now - s->last_output_time).count();
 
     s->last_output_time = now;
 
-    outputs[0].type = SPC_DATA_TABLE;
-    outputs[0].table = out;
-    return 0;
+    step->outputs[0].type = SPC_DATA_TABLE;
+    step->outputs[0].table = out;
+    return SPC_OK;
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .process           = process,
-    .start             = start,
-    .stop              = stop,
-    .set_host_services = set_host_services
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+};
+}

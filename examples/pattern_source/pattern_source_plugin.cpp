@@ -1,89 +1,95 @@
+// Generates a scrolling gradient test pattern at a target frame rate, drawn
+// straight into frames the host lends from its pool.
+
+#include <speculor/plugin.h>
 #include <speculor/plugin_helpers.h>
-#include <cstdlib>
-#include <cmath>
+
 #include <chrono>
+#include <new>
 #include <thread>
 #include <vector>
 
-// GUI-thread-set parameters, snapshotted on the worker (H6)
-struct Params
-{
-    int32_t width = 640;
-    int32_t height = 480;
-    float target_fps = 30.0f;
+// The parameters, in declaration order: values[P_...] is that parameter's value.
+enum Param : uint32_t {
+    P_WIDTH,
+    P_HEIGHT,
+    P_TARGET_FPS,
 };
-
-struct PatternSourceState
-{
-    spc::SharedParams<Params> params;
-    // dimensions the owned buffer was last sized for; the worker reallocates
-    // in process() on change instead of from set_parameter (which would race)
-    int32_t applied_w = -1;
-    int32_t applied_h = -1;
-    uint64_t frame_count;
-    std::vector<uint8_t> buffer;
-    SpcFrame current_frame;
-    std::chrono::steady_clock::time_point last_frame_time;
-    spc::HostServices host;
-};
-
-SPC_PLUGIN_CAST(PatternSourceState)
-SPC_PLUGIN_HOST_SERVICES(PatternSourceState, host)
 
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("pattern_source", "Pattern Source", "Sources/Video")
         .author("Speculor").version("0.1.0")
-        .description("Generates a scrolling gradient test pattern")
+        .help("Generates a scrolling gradient test pattern")
         .maturity(SPC_MATURITY_PREVIEW)
         .tags({"image", "common"})
         .output("image_out", "Image Output", SPC_DATA_FRAME)
         .int_param("width", "Width", 64, 3840, 640, 1, "Resolution")
-            .param_description("Output frame width in pixels")
+            .param_help("Output frame width in pixels")
         .int_param("height", "Height", 64, 2160, 480, 1, "Resolution")
-            .param_description("Output frame height in pixels")
+            .param_help("Output frame height in pixels")
         .float_param("target_fps", "Target FPS", 1.0f, 240.0f, 30.0f, 1.0f, "Timing")
-            .param_description("Target output frame rate")
-        .frame_alloc()
+            .param_help("Target output frame rate")
 )
 
-static SpcPluginInstance* create_instance()
+struct Params
 {
-    auto* s = new PatternSourceState{};
-    s->frame_count = 0;
-    std::memset(&s->current_frame, 0, sizeof(SpcFrame));
-    return reinterpret_cast<SpcPluginInstance*>(s);  // buffer sized in process()
+    int32_t width;
+    int32_t height;
+    float target_fps;
+};
+
+static Params read_params(const SpcValue* values)
+{
+    Params p;
+    p.width      = values[P_WIDTH].i;
+    p.height     = values[P_HEIGHT].i;
+    p.target_fps = values[P_TARGET_FPS].f;
+    return p;
 }
 
-static void destroy_instance(SpcPluginInstance* inst) {
-    delete state(inst);
+struct PatternSourceState
+{
+    SpcHost* host = nullptr;   // valid until stop() returns
+    Params params{};
+    uint64_t frame_count = 0;
+    // the frame used when the host lends none
+    std::vector<uint8_t> buffer;
+    SpcFrame current_frame{};
+    std::chrono::steady_clock::time_point last_frame_time;
+};
+
+static PatternSourceState* state(SpcPluginInstance* instance)
+{
+    return reinterpret_cast<PatternSourceState*>(instance);
 }
 
-static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcParameterDesc* value) {
-    // Mutate the shared block only; the worker reallocates the buffer in
-    // process() when it observes a dimension change (was a data race).
-    bool matched = state(inst)->params.update([&](Params& p) {
-        return spc::try_set_int  (name, value, "width", p.width)
-            || spc::try_set_int  (name, value, "height", p.height)
-            || spc::try_set_float(name, value, "target_fps", p.target_fps);
-    });
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
+static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)
+{
+    auto* s = new (std::nothrow) PatternSourceState{};
+    if (!s) return nullptr;
+    s->host = host;
+    s->params = read_params(values);
+    return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
-static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t /*input_count*/,
-                   SpcData* outputs, uint32_t output_count) {
-    auto* s = state(inst);
-    if (output_count < 1) return -1;
+static void stop(SpcPluginInstance* instance)
+{
+    delete state(instance);
+}
 
-    const Params p = s->params.snapshot();  // one consistent view per frame
+static void params_changed(SpcPluginInstance* instance, const SpcValue* values,
+                           uint64_t /*changed*/)
+{
+    state(instance)->params = read_params(values);
+}
+
+static int process(SpcPluginInstance* instance, SpcStep* step)
+{
+    auto* s = state(instance);
+    SpcHost* host = s->host;
+    const Params& p = s->params;
     const uint32_t w = static_cast<uint32_t>(p.width);
     const uint32_t h = static_cast<uint32_t>(p.height);
-
-    // reallocate the owned fallback buffer on the worker when dimensions change
-    if (p.width != s->applied_w || p.height != s->applied_h) {
-        s->applied_w = p.width;
-        s->applied_h = p.height;
-        s->buffer.resize(static_cast<size_t>(w) * h * 3);
-    }
 
     // pace to target FPS
     if (p.target_fps > 0.0f) {
@@ -97,8 +103,11 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
         s->last_frame_time = std::chrono::steady_clock::now();
     }
 
-    // try to allocate directly into the pool
-    SpcFrame* out_frame = s->host.acquire_frame(0, w, h, SPC_PIXEL_FORMAT_RGB24);
+    // A frame from the host's pool is drawn in place and published without a
+    // copy. When the host lends none, a frame of the plugin's own is copied.
+    SpcFrame* out_frame = host->frame ? host->frame(host, 0, w, h, SPC_PIXEL_FORMAT_RGB24)
+                                      : nullptr;
+    if (!out_frame) s->buffer.resize(static_cast<size_t>(w) * h * 3);
 
     uint8_t* dst = out_frame ? out_frame->data : s->buffer.data();
     uint32_t stride = out_frame ? out_frame->stride : w * 3;
@@ -114,29 +123,31 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
         }
     }
 
+    SpcData& out = step->outputs[0];
+    out.type = SPC_DATA_FRAME;
     if (out_frame) {
-        out_frame->timestamp_ns = 0;
-        out_frame->frame_number = s->frame_count++;
-        outputs[0].type = SPC_DATA_FRAME;
-        outputs[0].frame = out_frame;
+        out_frame->timestamp_ns = 0;   // 0: the engine stamps the time it publishes the frame
+        out_frame->sequence = s->frame_count++;
+        out.frame = out_frame;         // the engine's from here on, whatever process() returns
     } else {
         s->current_frame.data = s->buffer.data();
         s->current_frame.width = w;
         s->current_frame.height = h;
         s->current_frame.stride = w * 3;
         s->current_frame.format = SPC_PIXEL_FORMAT_RGB24;
-        s->current_frame.frame_number = s->frame_count++;
-        outputs[0].type = SPC_DATA_FRAME;
-        outputs[0].frame = &s->current_frame;
+        s->current_frame.sequence = s->frame_count++;
+        out.frame = &s->current_frame;
     }
-    return 0;
+    return SPC_OK;
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .process           = process,
-    .set_host_services = set_host_services
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+};
+}

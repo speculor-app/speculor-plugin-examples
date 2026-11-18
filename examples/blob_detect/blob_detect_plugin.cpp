@@ -1,3 +1,7 @@
+// Connected-component blob detection on a foreground mask, with spclib: one
+// TABLE record per blob, and the source image passed through untouched.
+
+#include <speculor/plugin.h>
 #include <speculor/plugin_helpers.h>
 #include <speculor/table_helpers.h>
 #include <speculor/spclib_log_bridge.h>
@@ -6,53 +10,40 @@
 
 #include <opencv2/core.hpp>
 
-#include <atomic>
+#include <algorithm>
 #include <memory>
+#include <new>
 #include <vector>
+
+// The parameters, in declaration order: values[P_...] is that parameter's value.
+enum Param : uint32_t {
+    P_CONNECTIVITY,
+    P_ENABLE_JOIN,
+    P_SIZE_THRESHOLD,
+    P_AREA_THRESHOLD,
+    P_MIN_DISTANCE,
+    P_MAX_BLOBS,
+    P_BBOX_PADDING,
+};
+
+// the ports, in declaration order
+enum Input : uint32_t { IN_MASK, IN_IMAGE };
+enum Output : uint32_t { OUT_BOXES, OUT_IMAGE };
 
 // output schema field indices
 enum { F_X = 0, F_Y, F_W, F_H, F_CONFIDENCE, F_AREA, F_MEAN_INTENSITY,
        F_CENTROID_X, F_CENTROID_Y, F_SOLIDITY, F_ASPECT_RATIO, FIELD_COUNT };
 
-// GUI-thread-set parameters, snapshotted on the worker (H6). The detector is
-// worker-owned (its setters write fields detect() reads), so set_parameter
-// only mutates this block and the worker applies the snapshot on a dirty flag.
-struct Params
-{
-    int32_t size_threshold = 5;
-    int32_t area_threshold = 25;
-    int32_t min_distance = 25;
-    int32_t max_blobs = 100;
-    int32_t enable_join = 1;
-    int32_t connectivity = 1; // 0=Four, 1=Eight
-    float bbox_padding = 0.0f; // symmetric expansion of output bbox, fraction of bbox size
-};
-
-// internal state
-struct BlobDetectState
-{
-    spc::HostServices host;
-    std::unique_ptr<spclib::blobs::ConnectedBlobDetection> detector;
-    cv::Mat input_image;
-    std::vector<spclib::blobs::BlobInfo> blobs;
-
-    // cross-thread parameter block (GUI writes, worker snapshots per frame)
-    spc::SharedParams<Params> params;
-    std::atomic<bool> params_dirty{false};
-};
-
-SPC_PLUGIN_CAST(BlobDetectState)
-SPC_PLUGIN_HOST_SERVICES(BlobDetectState, host)
-
-
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("blob_detect", "Blob Detect", "Analysis/Detection")
         .author("Speculor").version("0.2.0")
-        .description("Connected-component blob detection with optional merging and shape filtering")
+        .help("Connected-component blob detection with optional merging and shape filtering")
         .maturity(SPC_MATURITY_STABLE)
         .tags({"image", "tracking"})
         .input("mask_in", "FG Mask", SPC_DATA_FRAME, 32, SPC_CONSUME_FIFO)
-        .input("image_in", "Image", SPC_DATA_FRAME, 32, SPC_CONSUME_FIFO).passthrough()
+        // SPC_INPUT_GPU_OK: a GPU-resident image arrives as it is, not
+        // downloaded; it is passed on, and read only when it has CPU pixels
+        .input("image_in", "Image", SPC_DATA_FRAME, 32, SPC_CONSUME_FIFO).gpu_ok()
         .output_table("boxes_out", "Boxes", {
             {"x", SPC_FIELD_FLOAT}, {"y", SPC_FIELD_FLOAT},
             {"w", SPC_FIELD_FLOAT}, {"h", SPC_FIELD_FLOAT},
@@ -65,23 +56,59 @@ SPC_PLUGIN_DESCRIPTOR(
         })
         .output("image_out", "Image", SPC_DATA_FRAME)
         .enum_param("connectivity", "Connectivity", {"4-connected", "8-connected"}, 1, "Detection")
-            .param_description("Pixel neighborhood for connected component search")
+            .param_help("Pixel neighborhood for connected component search")
         .bool_param("enable_join", "Join Nearby", true, "Detection")
-            .param_description("Merge nearby blobs within Min Distance into single detections")
+            .param_help("Merge nearby blobs within Min Distance into single detections")
         .int_param("size_threshold", "Size Threshold", 2, 100, 5, 1, "Detection")
-            .param_description("Minimum bounding box size in pixels to accept a detection")
+            .param_help("Minimum bounding box size in pixels to accept a detection")
         .int_param("area_threshold", "Area Threshold", 4, 10000, 25, 1, "Detection")
-            .param_description("Minimum pixel area of a connected component to count as a blob")
+            .param_help("Minimum pixel area of a connected component to count as a blob")
         .int_param("min_distance", "Min Distance", 2, 200, 25, 1, "Detection")
-            .param_description("Minimum distance in pixels between blob centers to merge nearby detections")
+            .param_help("Minimum distance in pixels between blob centers to merge nearby detections")
         .int_param("max_blobs", "Max Blobs", 1, 500, 100, 1, "Detection")
-            .param_description("Maximum number of blobs to report per frame")
+            .param_help("Maximum number of blobs to report per frame")
         .float_param("bbox_padding", "Bbox Padding", 0.0f, 0.5f, 0.0f, 0.01f, "Detection")
-            .param_description("Symmetric margin added around each output bbox, as a fraction of bbox size. Clamped to frame bounds. Does not affect centroid, area, mean intensity, solidity, or aspect ratio.")
-        .frame_alloc()
+            .param_help("Symmetric margin added around each output bbox, as a fraction of bbox size. Clamped to frame bounds. Does not affect centroid, area, mean intensity, solidity, or aspect ratio.")
 )
 
-// --- lifecycle ---
+struct Params
+{
+    int32_t connectivity;   // 0=Four, 1=Eight
+    int32_t enable_join;
+    int32_t size_threshold;
+    int32_t area_threshold;
+    int32_t min_distance;
+    int32_t max_blobs;
+    float bbox_padding;     // symmetric expansion of output bbox, fraction of bbox size
+};
+
+static Params read_params(const SpcValue* values)
+{
+    Params p;
+    p.connectivity   = values[P_CONNECTIVITY].choice.index;
+    p.enable_join    = values[P_ENABLE_JOIN].i;
+    p.size_threshold = values[P_SIZE_THRESHOLD].i;
+    p.area_threshold = values[P_AREA_THRESHOLD].i;
+    p.min_distance   = values[P_MIN_DISTANCE].i;
+    p.max_blobs      = values[P_MAX_BLOBS].i;
+    p.bbox_padding   = values[P_BBOX_PADDING].f;
+    return p;
+}
+
+struct BlobDetectState
+{
+    SpcHost* host = nullptr;   // valid until stop() returns
+    SpcLogContext log{};
+    Params params{};
+    std::unique_ptr<spclib::blobs::ConnectedBlobDetection> detector;
+    cv::Mat input_image;
+    std::vector<spclib::blobs::BlobInfo> blobs;
+};
+
+static BlobDetectState* state(SpcPluginInstance* instance)
+{
+    return reinterpret_cast<BlobDetectState*>(instance);
+}
 
 static spclib::blobs::ConnectedBlobDetectionParams build_params(const Params& sp)
 {
@@ -97,112 +124,70 @@ static spclib::blobs::ConnectedBlobDetectionParams build_params(const Params& sp
     return p;
 }
 
-// apply a parameter snapshot to the live detector. Worker thread only.
-static void apply_params(BlobDetectState* s, const Params& sp)
+static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)
 {
-    s->detector->set_size_threshold(sp.size_threshold);
-    s->detector->set_area_threshold(sp.area_threshold);
-    s->detector->set_min_distance(sp.min_distance);
-    s->detector->set_max_blobs(sp.max_blobs);
-    s->detector->set_enable_join(sp.enable_join != 0);
-    s->detector->set_connectivity(sp.connectivity == 0
+    auto* s = new (std::nothrow) BlobDetectState{};
+    if (!s) return nullptr;
+    s->host = host;
+    s->log = spc::log_context(host);   // a convenience over host->log, for the SPC_LOG_* macros
+    s->params = read_params(values);
+    s->detector = std::make_unique<spclib::blobs::ConnectedBlobDetection>(
+        build_params(s->params));
+    SPC_LOG_INFO(&s->log, "Blob Detect started");
+    return reinterpret_cast<SpcPluginInstance*>(s);
+}
+
+static void stop(SpcPluginInstance* instance)
+{
+    auto* s = state(instance);
+    SPC_LOG_INFO(&s->log, "Blob Detect stopped");
+    delete s;
+}
+
+// On the node's thread, between steps: the detector can be changed in place.
+static void params_changed(SpcPluginInstance* instance, const SpcValue* values,
+                           uint64_t /*changed*/)
+{
+    auto* s = state(instance);
+    s->params = read_params(values);
+    const Params& p = s->params;
+    s->detector->set_size_threshold(p.size_threshold);
+    s->detector->set_area_threshold(p.area_threshold);
+    s->detector->set_min_distance(p.min_distance);
+    s->detector->set_max_blobs(p.max_blobs);
+    s->detector->set_enable_join(p.enable_join != 0);
+    s->detector->set_connectivity(p.connectivity == 0
         ? spclib::blobs::Connectivity::Four
         : spclib::blobs::Connectivity::Eight);
 }
 
-static SpcPluginInstance* create_instance()
-{
-    auto* s = new BlobDetectState{};
-
-    s->detector = std::make_unique<spclib::blobs::ConnectedBlobDetection>(
-        build_params(s->params.snapshot()));
-
-    return reinterpret_cast<SpcPluginInstance*>(s);
-}
-
-static void destroy_instance(SpcPluginInstance* inst)
-{
-    auto* s = state(inst);
-    s->detector.reset();
-    delete s;
-}
-
-// --- parameters ---
-
-static int set_parameter(SpcPluginInstance* inst, const char* name, const SpcParameterDesc* value)
-{
-    auto* s = state(inst);
-    // Mutate the shared block only; the worker applies it to the detector on
-    // the dirty flag (detector setters must not run concurrently with detect()).
-    bool matched = s->params.update([&](Params& p) {
-        return spc::try_set_int  (name, value, "size_threshold", p.size_threshold)
-            || spc::try_set_int  (name, value, "area_threshold", p.area_threshold)
-            || spc::try_set_int  (name, value, "min_distance", p.min_distance)
-            || spc::try_set_int  (name, value, "max_blobs", p.max_blobs)
-            || spc::try_set_bool (name, value, "enable_join", p.enable_join)
-            || spc::try_set_enum (name, value, "connectivity", p.connectivity)
-            || spc::try_set_float(name, value, "bbox_padding", p.bbox_padding);
-    });
-    if (matched) s->params_dirty.store(true, std::memory_order_release);
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
-}
-
+// Which parameters the values leave disabled: a function of the values alone,
+// called with no instance, on any thread. `states` has one entry per parameter.
 static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    spc::ParamRules r(get_descriptor(), values, states);
-    r.disable("min_distance", !r.on("enable_join"));
+    if (values[P_ENABLE_JOIN].i == 0) states[P_MIN_DISTANCE] |= SPC_PARAM_STATE_DISABLED;
 }
 
-// --- streaming ---
-
-static int start(SpcPluginInstance* inst)
+static int process(SpcPluginInstance* instance, SpcStep* step)
 {
-    auto* s = state(inst);
-    spc::install_spclib_log_bridge(&s->host.cached_log);
-    // recreate detector with current params on start
-    s->detector = std::make_unique<spclib::blobs::ConnectedBlobDetection>(
-        build_params(s->params.snapshot()));
-    s->params_dirty.store(false, std::memory_order_release);
-    SPC_LOG_INFO(&s->host.cached_log, "Blob Detect started");
-    return 0;
-}
+    auto* s = state(instance);
+    SpcHost* host = s->host;
+    const Params& p = s->params;
+    const SpcData* inputs = step->inputs;
 
-static int stop(SpcPluginInstance* inst)
-{
-    auto* s = state(inst);
-    SPC_LOG_INFO(&s->host.cached_log, "Blob Detect stopped");
-    return 0;
-}
+    // spclib logs through a sink kept per thread: route this thread's to the
+    // node's log before calling into it
+    spc::install_spclib_log_bridge(&s->log);
 
-// --- process ---
+    if (inputs[IN_MASK].type != SPC_DATA_FRAME || !inputs[IN_MASK].frame) return SPC_SKIP;
 
-static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t input_count,
-                   SpcData* outputs, uint32_t output_count)
-{
-    auto* s = state(inst);
+    SpcFrame* in_frame = inputs[IN_MASK].frame;
+    if (in_frame->format != SPC_PIXEL_FORMAT_GRAY8) return SPC_FAILED;
 
-    // ensure spclib log bridge is installed on this (node) thread
-    thread_local bool bridge_installed = false;
-    if (!bridge_installed) {
-        spc::install_spclib_log_bridge(&s->host.cached_log);
-        bridge_installed = true;
-    }
-
-    if (input_count < 1 || output_count < 2) return -1;
-    if (inputs[0].type != SPC_DATA_FRAME || !inputs[0].frame) return SPC_NO_DATA;
-
-    SpcFrame* in_frame = const_cast<SpcFrame*>(inputs[0].frame);
-    if (in_frame->format != SPC_PIXEL_FORMAT_GRAY8) return -1;
-
-    // apply any GUI-thread parameter change to the worker-owned detector
-    const Params p = s->params.snapshot();
-    if (s->params_dirty.exchange(false, std::memory_order_acquire))
-        apply_params(s, p);
-
-    // ensure CPU data is available (GPU-resident frames need lazy download)
+    // a GPU-resident mask needs its pixels on the CPU first
     if ((in_frame->gpu_flags & SPC_GPU_FLAG_RESIDENT) &&
-        !(in_frame->gpu_flags & SPC_GPU_FLAG_CPU_VALID)) {
-        s->host.ensure_cpu_data(in_frame);
+        !(in_frame->gpu_flags & SPC_GPU_FLAG_CPU_VALID) && host->ensure_cpu_data) {
+        host->ensure_cpu_data(host, in_frame);
     }
 
     // wrap input mask directly (zero-copy)
@@ -216,17 +201,17 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
 
     auto count = static_cast<uint32_t>(s->blobs.size());
 
-    // one record per blob in a table the host lends for output 0, valid until
-    // process() returns
-    SpcTable* out = s->host.table(0, count);
-    if (!out) return -1;
+    // one record per blob in a table the host lends, valid until process()
+    // returns; spc_table_set_* (table_helpers.h) write a field at its offset
+    SpcTable* out = host->table ? host->table(host, OUT_BOXES, count) : nullptr;
+    if (!out) return SPC_FAILED;
     const uint32_t* off = out->field_offsets;
 
     // optional: compute mean intensity from image_in if available
-    const SpcFrame* img_frame = nullptr;
-    if (input_count > 1 && inputs[1].type == SPC_DATA_FRAME && inputs[1].frame)
+    SpcFrame* img_frame = nullptr;
+    if (inputs[IN_IMAGE].type == SPC_DATA_FRAME && inputs[IN_IMAGE].frame)
     {
-        img_frame = inputs[1].frame;
+        img_frame = inputs[IN_IMAGE].frame;
     }
 
     // convert pixel-space blobs to normalized table records
@@ -303,26 +288,27 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
                            spclib::blobs::aspect_ratio(b));
     }
 
-    out->frame_number = in_frame->frame_number;
+    out->sequence = in_frame->sequence;
     out->timestamp_ns = in_frame->timestamp_ns;
 
-    outputs[0].type = SPC_DATA_TABLE;
-    outputs[0].table = out;
+    step->outputs[OUT_BOXES].type = SPC_DATA_TABLE;
+    step->outputs[OUT_BOXES].table = out;
     if (img_frame) {
-        outputs[1].type = SPC_DATA_FRAME;
-        outputs[1].frame = const_cast<SpcFrame*>(img_frame);
+        // an input frame passed on unchanged: the engine shares it, no copy
+        step->outputs[OUT_IMAGE].type = SPC_DATA_FRAME;
+        step->outputs[OUT_IMAGE].frame = img_frame;
     }
-    return 0;
+    return SPC_OK;
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .param_rules       = param_rules,
-    .process           = process,
-    .start             = start,
-    .stop              = stop,
-    .set_host_services = set_host_services
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+    .param_rules    = param_rules,
+};
+}

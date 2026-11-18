@@ -1,10 +1,24 @@
+// Generates a waveform at real-time rate on a SIGNAL output: blocks of samples
+// written into tables the host lends.
+
+#include <speculor/plugin.h>
 #include <speculor/plugin_helpers.h>
 #include <speculor/table_helpers.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <new>
 #include <numbers>
 #include <thread>
+
+// The parameters, in declaration order: values[P_...] is that parameter's value.
+enum Param : uint32_t {
+    P_WAVE_TYPE,
+    P_FREQUENCY,
+    P_AMPLITUDE,
+    P_SAMPLE_RATE,
+};
 
 // output schema field indices
 enum { F_AMPLITUDE = 0, FIELD_COUNT };
@@ -13,31 +27,60 @@ enum { F_AMPLITUDE = 0, FIELD_COUNT };
 constexpr uint32_t min_batch = 64;
 constexpr uint32_t max_batch = 8192;
 
-// GUI-thread-set parameters, snapshotted on the worker (H6)
+SPC_PLUGIN_DESCRIPTOR(
+    spc::DescriptorBuilder("wave_gen", "Wave Generator", "Signal/Audio/Sources")
+        .author("Speculor").version("0.1.0")
+        .help("Generates audio waveform samples at real-time rate")
+        .maturity(SPC_MATURITY_EXPERIMENTAL)
+        .tags({"radio", "common"})
+        .output_signal("samples_out", "Samples", {
+            {"amplitude", SPC_FIELD_FLOAT},
+        })
+        .enum_param("wave_type", "Wave Type",
+                     {"Sine", "Square", "Triangle", "Sawtooth"}, 0, "Waveform")
+            .param_help("Waveform shape: sine, square, sawtooth, or triangle")
+        .float_param("frequency", "Frequency (Hz)", 20.0f, 20000.0f, 440.0f, 1.0f, "Waveform")
+            .param_help("Signal frequency in Hz")
+        .float_param("amplitude", "Amplitude", 0.0f, 1.0f, 0.5f, 0.01f, "Waveform")
+            .param_help("Signal amplitude (0 to 1)")
+        .int_param("sample_rate", "Sample Rate", 8000, 192000, 44100, 1000, "Output")
+            .param_help("Output sample rate in Hz")
+)
+
 struct Params
 {
-    int32_t wave_type = 0;    // 0=Sine, 1=Square, 2=Triangle, 3=Sawtooth
-    float frequency = 440.0f;
-    float amplitude = 0.5f;
-    int32_t sample_rate = 44100;
+    int32_t wave_type;    // 0=Sine, 1=Square, 2=Triangle, 3=Sawtooth
+    float frequency;
+    float amplitude;
+    int32_t sample_rate;
 };
 
-// internal state
+static Params read_params(const SpcValue* values)
+{
+    Params p;
+    p.wave_type   = values[P_WAVE_TYPE].choice.index;   // ENUM: the position of the option
+    p.frequency   = values[P_FREQUENCY].f;
+    p.amplitude   = values[P_AMPLITUDE].f;
+    p.sample_rate = values[P_SAMPLE_RATE].i;
+    return p;
+}
+
 struct WaveGenState
 {
-    spc::HostServices host;
-
-    // cross-thread parameter block (GUI writes, worker snapshots per frame)
-    spc::SharedParams<Params> params;
+    SpcHost* host = nullptr;     // valid until stop() returns
+    SpcLogContext log{};
+    Params params{};
 
     // synthesis state
-    double phase;         // continuous phase accumulator [0, 1)
-    uint64_t sample_count;
+    double phase = 0.0;          // continuous phase accumulator [0, 1)
+    uint64_t sample_count = 0;
     std::chrono::steady_clock::time_point start_time;
 };
 
-SPC_PLUGIN_CAST(WaveGenState)
-SPC_PLUGIN_HOST_SERVICES(WaveGenState, host)
+static WaveGenState* state(SpcPluginInstance* instance)
+{
+    return reinterpret_cast<WaveGenState*>(instance);
+}
 
 // generate a single sample from the current phase [0, 1)
 static float generate_sample(int32_t wave_type, double phase, float amplitude)
@@ -60,89 +103,42 @@ static float generate_sample(int32_t wave_type, double phase, float amplitude)
     return static_cast<float>(value) * amplitude;
 }
 
-SPC_PLUGIN_DESCRIPTOR(
-    spc::DescriptorBuilder("wave_gen", "Wave Generator", "Signal/Audio/Sources")
-        .author("Speculor").version("0.1.0")
-        .description("Generates audio waveform samples at real-time rate")
-        .maturity(SPC_MATURITY_EXPERIMENTAL)
-        .tags({"radio", "common"})
-        .output_signal("samples_out", "Samples", {
-            {"amplitude", SPC_FIELD_FLOAT},
-        })
-        .enum_param("wave_type", "Wave Type",
-                     {"Sine", "Square", "Triangle", "Sawtooth"}, 0, "Waveform")
-            .param_description("Waveform shape: sine, square, sawtooth, or triangle")
-        .float_param("frequency", "Frequency (Hz)", 20.0f, 20000.0f, 440.0f, 1.0f, "Waveform")
-            .param_description("Signal frequency in Hz")
-        .float_param("amplitude", "Amplitude", 0.0f, 1.0f, 0.5f, 0.01f, "Waveform")
-            .param_description("Signal amplitude (0 to 1)")
-        .int_param("sample_rate", "Sample Rate", 8000, 192000, 44100, 1000, "Output")
-            .param_description("Output sample rate in Hz")
-)
-
-// --- lifecycle ---
-
-static SpcPluginInstance* create_instance()
+static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)
 {
-    auto* s = new WaveGenState{};
-    s->phase = 0.0;
-    s->sample_count = 0;
-    return reinterpret_cast<SpcPluginInstance*>(s);
-}
-
-static void destroy_instance(SpcPluginInstance* inst)
-{
-    delete state(inst);
-}
-
-// --- parameters ---
-
-static int set_parameter(SpcPluginInstance* inst, const char* name,
-                         const SpcParameterDesc* value)
-{
-    bool matched = state(inst)->params.update([&](Params& p) {
-        return spc::try_set_enum (name, value, "wave_type",   p.wave_type)
-            || spc::try_set_float(name, value, "frequency",   p.frequency)
-            || spc::try_set_float(name, value, "amplitude",   p.amplitude)
-            || spc::try_set_int  (name, value, "sample_rate", p.sample_rate);
-    });
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
-}
-
-// --- streaming ---
-
-static int start(SpcPluginInstance* inst)
-{
-    auto* s = state(inst);
-    const Params p = s->params.snapshot();
-    s->phase = 0.0;
-    s->sample_count = 0;
+    auto* s = new (std::nothrow) WaveGenState{};
+    if (!s) return nullptr;
+    s->host = host;
+    s->log = spc::log_context(host);   // a convenience over host->log, for the SPC_LOG_* macros
+    s->params = read_params(values);
     s->start_time = std::chrono::steady_clock::now();
-    SPC_LOG_INFO(&s->host.cached_log, "Wave Generator started (%.0f Hz %s, %d Hz sample rate)",
+    const Params& p = s->params;
+    SPC_LOG_INFO(&s->log, "Wave Generator started (%.0f Hz %s, %d Hz sample rate)",
                  p.frequency,
                  p.wave_type == 0 ? "sine" : p.wave_type == 1 ? "square"
                      : p.wave_type == 2 ? "triangle" : "sawtooth",
                  p.sample_rate);
-    return 0;
+    return reinterpret_cast<SpcPluginInstance*>(s);
 }
 
-static int stop(SpcPluginInstance* inst)
+static void stop(SpcPluginInstance* instance)
 {
-    auto* s = state(inst);
-    SPC_LOG_INFO(&s->host.cached_log, "Wave Generator stopped (%llu samples emitted)",
+    auto* s = state(instance);
+    SPC_LOG_INFO(&s->log, "Wave Generator stopped (%llu samples emitted)",
                  static_cast<unsigned long long>(s->sample_count));
-    return 0;
+    delete s;
 }
 
-// --- process ---
-
-static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t /*input_count*/,
-                   SpcData* outputs, uint32_t output_count)
+static void params_changed(SpcPluginInstance* instance, const SpcValue* values,
+                           uint64_t /*changed*/)
 {
-    auto* s = state(inst);
-    if (output_count < 1) return -1;
+    state(instance)->params = read_params(values);
+}
 
-    const Params p = s->params.snapshot();  // one consistent view per frame
+static int process(SpcPluginInstance* instance, SpcStep* step)
+{
+    auto* s = state(instance);
+    SpcHost* host = s->host;
+    const Params& p = s->params;
 
     // compute how many samples should have been produced by now
     auto now = std::chrono::steady_clock::now();
@@ -176,13 +172,15 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
                                              static_cast<uint64_t>(max_batch)))
             : uint32_t{0};
 
-        if (to_generate == 0) return 0;
+        if (to_generate == 0) return SPC_OK;
     }
 
-    // the host lends the output table: zeroed, to_generate records of the
-    // port's schema, valid until process() returns
-    SpcTable* out = s->host.table(0, to_generate);
-    if (!out) return -1;
+    // The host lends the output table: to_generate zeroed records of the
+    // port's schema, the host's until process() returns. A function the host
+    // does not provide is null.
+    SpcTable* out = host->table ? host->table(host, 0, to_generate) : nullptr;
+    if (!out) return SPC_FAILED;
+    // where each field of the port is in a record, in declaration order
     const uint32_t* off = out->field_offsets;
 
     double phase_inc = static_cast<double>(p.frequency) / static_cast<double>(p.sample_rate);
@@ -190,6 +188,7 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     for (uint32_t i = 0; i < to_generate; ++i)
     {
         float sample = generate_sample(p.wave_type, s->phase, p.amplitude);
+        // spc_table_set_float (table_helpers.h) writes the float at that offset of record i
         spc_table_set_float(out, i, off[F_AMPLITUDE], sample);
 
         s->phase += phase_inc;
@@ -197,24 +196,25 @@ static int process(SpcPluginInstance* inst, const SpcData* /*inputs*/, uint32_t 
     }
 
     // timestamp from cumulative sample position
-    out->frame_number = s->sample_count / min_batch;
+    out->sequence = s->sample_count / min_batch;
     out->timestamp_ns = static_cast<int64_t>(
         static_cast<double>(s->sample_count) / static_cast<double>(p.sample_rate) * 1e9);
 
     s->sample_count += to_generate;
 
-    outputs[0].type = SPC_DATA_SIGNAL;
-    outputs[0].table = out;
-    return 0;
+    // emitting the lent table publishes it without a copy
+    step->outputs[0].type = SPC_DATA_SIGNAL;
+    step->outputs[0].table = out;
+    return SPC_OK;
 }
 
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .process           = process,
-    .start             = start,
-    .stop              = stop,
-    .set_host_services = set_host_services
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+};
+}
