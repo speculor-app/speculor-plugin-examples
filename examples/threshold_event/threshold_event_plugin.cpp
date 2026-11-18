@@ -68,19 +68,24 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs, uint32_t inpu
     e.severity    = static_cast<uint32_t>(p.severity);
     // timestamp_ns left 0 -> the host stamps the event with its disciplined clock
 
+    char detail[SPC_EVENT_DETAIL_MAX];
+    char data_json[SPC_EVENT_DATA_MAX];
     if (above) {
         e.phase = SPC_EVENT_BEGIN;
         e.id    = s->open_id = s->next_id++;   // open a span
-        std::snprintf(e.label,  sizeof(e.label),  "Above threshold");
-        std::snprintf(e.detail, sizeof(e.detail), "value %.3f rose above %.3f", value, p.threshold);
+        e.label = "Above threshold";
+        std::snprintf(detail, sizeof(detail), "value %.3f rose above %.3f", value, p.threshold);
     } else {
         e.phase = SPC_EVENT_END;
         e.id    = s->open_id;                  // close the span opened above
-        std::snprintf(e.label,  sizeof(e.label),  "Back below threshold");
-        std::snprintf(e.detail, sizeof(e.detail), "value %.3f fell below %.3f", value, p.threshold);
+        e.label = "Back below threshold";
+        std::snprintf(detail, sizeof(detail), "value %.3f fell below %.3f", value, p.threshold);
     }
-    std::snprintf(e.data_json, sizeof(e.data_json),
+    std::snprintf(data_json, sizeof(data_json),
                   "{\"value\":%.6f,\"threshold\":%.6f}", value, p.threshold);
+    // the host copies the strings during emit_event, so stack buffers are enough
+    e.detail    = detail;
+    e.data_json = data_json;
 
     s->host.emit_event(e);
     return 0;
