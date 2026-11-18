@@ -23,12 +23,12 @@ set(SPC_PLUGIN_OUTPUT_DIR ${CMAKE_BINARY_DIR}/plugins)
 add_subdirectory(examples/scalar_source)     # SCALAR out
 add_subdirectory(examples/pattern_source)    # FRAME out (test pattern)
 add_subdirectory(examples/wave_gen)          # SIGNAL out (synthetic waveform)
-add_subdirectory(examples/logic_gate)        # SCALAR in -> SCALAR + CONTROL_MSG out
-add_subdirectory(examples/system_stats)      # TABLE + RECORD out (OS metrics)
+add_subdirectory(examples/logic_gate)        # SCALAR in -> SCALAR + CONTROL out
+add_subdirectory(examples/system_stats)      # TABLE + JSON out (OS metrics)
 add_subdirectory(examples/threshold_event)   # SCALAR in -> SpcEvent (emit_event)
-add_subdirectory(examples/clock_probe)       # RECORD out (host disciplined clock)
+add_subdirectory(examples/clock_probe)       # JSON out (host disciplined clock)
 add_subdirectory(examples/uplink_sink)       # SCALAR in -> sink (live_only + license_tier)
-add_subdirectory(examples/udp_scalar_source) # SCALAR out (UDP) — data_source + request_stop
+add_subdirectory(examples/udp_scalar_source) # SCALAR out (UDP) — source + interrupt
 
 # SDK + bundled helper libs (pocketfft / OpenCV / spclib):
 add_subdirectory(examples/audio_analyzer)    # SIGNAL in -> TABLE out (FFT, pocketfft)

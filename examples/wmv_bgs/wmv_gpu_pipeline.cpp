@@ -59,7 +59,7 @@ bool WmvGpuPipeline::prepare(VulkanContext &ctx, uint32_t width, uint32_t height
 
     wait_timeline_idle(ctx);
 
-    // output buffer (bufs_[4]) + its staging are engine-owned ring slots now.
+    // output buffer (bufs_[4]) + its staging are the engine's ring slots, not made here.
     staging_mask_.destroy(ctx);
     for (int i = 0; i < NUM_BUFFERS; ++i) spc::gpu::destroy_buffer(ctx, bufs_[i], mems_[i]);
     spc::gpu::destroy_buffer(ctx, packed_mask_buf_, packed_mask_mem_);
@@ -232,7 +232,7 @@ void WmvGpuPipeline::destroy(VulkanContext &ctx)
 {
     if (!ctx.device) return;
 
-    // output buffer (bufs_[4]) + its staging are engine-owned ring slots now.
+    // output buffer (bufs_[4]) + its staging are the engine's ring slots, not made here.
     staging_mask_.destroy(ctx);
     for (int i = 0; i < NUM_BUFFERS; ++i) spc::gpu::destroy_buffer(ctx, bufs_[i], mems_[i]);
     spc::gpu::destroy_buffer(ctx, packed_mask_buf_, packed_mask_mem_);

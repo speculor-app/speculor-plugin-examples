@@ -1,3 +1,8 @@
+// Draws the bounding boxes of a TABLE input onto the frames of a FRAME input,
+// with OpenCV. The table is read through its field_offsets, required fields
+// and optional ones alike.
+
+#include <speculor/plugin.h>
 #include <speculor/plugin_helpers.h>
 #include <speculor/table_helpers.h>
 #include <cv_helpers.h>
@@ -6,43 +11,35 @@
 
 #include <algorithm>
 #include <format>
+#include <new>
+#include <string>
 #include <vector>
 
-// boxes_in field indices, in the order the descriptor declares them:
-// the required fields, then the optional ones
+// The parameters, in declaration order: values[P_...] is that parameter's value.
+enum Param : uint32_t {
+    P_COLOR,
+    P_THICKNESS,
+    P_SHOW_INFO,
+    P_RESIZE_ENABLE,
+    P_RESIZE_WIDTH,
+    P_RESIZE_HEIGHT,
+};
+
+// the input ports, in declaration order
+enum Input : uint32_t { IN_BOXES, IN_IMAGE };
+
+// boxes_in field indices, in the order the input declares them: the required
+// fields, then the optional ones
 enum {
     F_X = 0, F_Y, F_W, F_H, F_CONFIDENCE,
     F_AREA, F_MEAN_INTENSITY, F_LABEL_NAME, F_CLASS_NAME,
     IN_FIELD_COUNT
 };
 
-// GUI-thread-set parameters, snapshotted on the worker (H6)
-struct Params {
-    uint32_t color_rgba = spc::color_pack(0, 255, 0);
-    int32_t thickness = 2;
-    int32_t show_info = 1;
-    int32_t resize_enable = 0;
-    int32_t resize_width = 1920;
-    int32_t resize_height = 1080;
-};
-
-struct BboxDisplayState {
-    spc::HostServices host;
-
-    spc::SharedParams<Params> params;
-
-    std::vector<uint8_t> buffer;
-    SpcFrame output_frame{};
-    cv::Mat converted_rgb; // keeps RGB conversion alive across output
-    cv::Mat resized_mat;   // keeps resized frame alive across output
-};
-
-SPC_PLUGIN(BboxDisplayState, host)
-
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("bbox_display", "BB Display", "Renderers/Overlays")
         .author("Speculor").version("0.1.0")
-        .description("Draws bounding boxes on an image frame")
+        .help("Draws bounding boxes on an image frame")
         .maturity(SPC_MATURITY_PREVIEW)
         .tags({"tracking", "image"})
         .input_table("boxes_in", "Boxes", {
@@ -59,50 +56,95 @@ SPC_PLUGIN_DESCRIPTOR(
         .input("image_in", "Image", SPC_DATA_FRAME)
         .output("image_out", "Image Out", SPC_DATA_FRAME)
         .color_param("color", "Color", spc::color_pack(0, 255, 0))
-            .param_description("Bounding box outline color")
+            .param_help("Bounding box outline color")
         .int_param("thickness", "Thickness", 1, 10, 2, 1)
-            .param_description("Bounding box line thickness in pixels")
+            .param_help("Bounding box line thickness in pixels")
         .bool_param("show_info", "Show Info", true)
-            .param_description("Show confidence and class label next to each box")
+            .param_help("Show confidence and class label next to each box")
         .bool_param("resize_enable", "Resize", false, "Output Resolution")
-            .param_description("Resize the output image to a specific resolution")
+            .param_help("Resize the output image to a specific resolution")
         .int_param("resize_width", "Width", 32, 7680, 1920, 1, "Output Resolution")
-            .param_description("Output image width in pixels")
+            .param_help("Output image width in pixels")
         .int_param("resize_height", "Height", 32, 4320, 1080, 1, "Output Resolution")
-            .param_description("Output image height in pixels")
-        .frame_alloc()
+            .param_help("Output image height in pixels")
 )
 
-// --- parameters ---------------------------------------------------------------
+struct Params {
+    uint32_t color_rgba;
+    int32_t thickness;
+    int32_t show_info;
+    int32_t resize_enable;
+    int32_t resize_width;
+    int32_t resize_height;
+};
 
-static int set_parameter(SpcPluginInstance* inst, const char* name,
-                         const SpcParameterDesc* value)
+static Params read_params(const SpcValue* values)
 {
-    bool matched = state(inst)->params.update([&](Params& p) {
-        return spc::try_set_color(name, value, "color", p.color_rgba)
-            || spc::try_set_int  (name, value, "thickness", p.thickness)
-            || spc::try_set_bool (name, value, "show_info", p.show_info)
-            || spc::try_set_bool (name, value, "resize_enable", p.resize_enable)
-            || spc::try_set_int  (name, value, "resize_width", p.resize_width)
-            || spc::try_set_int  (name, value, "resize_height", p.resize_height);
-    });
-    return matched ? SPC_OK : SPC_ERR_NOT_FOUND;
+    Params p;
+    p.color_rgba    = values[P_COLOR].color;   // COLOR: 0xRRGGBBAA
+    p.thickness     = values[P_THICKNESS].i;
+    p.show_info     = values[P_SHOW_INFO].i;
+    p.resize_enable = values[P_RESIZE_ENABLE].i;
+    p.resize_width  = values[P_RESIZE_WIDTH].i;
+    p.resize_height = values[P_RESIZE_HEIGHT].i;
+    return p;
 }
 
+struct BboxDisplayState {
+    SpcHost* host = nullptr;   // valid until stop() returns
+    Params params{};
+
+    // A frame of the plugin's own, for when the host lends none or the output
+    // is not the copied input. The engine copies it, so it only has to stay
+    // valid until process() returns.
+    std::vector<uint8_t> buffer;
+    SpcFrame output_frame{};
+    cv::Mat converted_rgb; // keeps RGB conversion alive across output
+    cv::Mat resized_mat;   // keeps resized frame alive across output
+};
+
+static BboxDisplayState* state(SpcPluginInstance* instance)
+{
+    return reinterpret_cast<BboxDisplayState*>(instance);
+}
+
+static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)
+{
+    auto* s = new (std::nothrow) BboxDisplayState{};
+    if (!s) return nullptr;
+    s->host = host;
+    s->params = read_params(values);
+    return reinterpret_cast<SpcPluginInstance*>(s);
+}
+
+static void stop(SpcPluginInstance* instance)
+{
+    delete state(instance);
+}
+
+static void params_changed(SpcPluginInstance* instance, const SpcValue* values,
+                           uint64_t /*changed*/)
+{
+    state(instance)->params = read_params(values);
+}
+
+// Which parameters the values leave disabled: a function of the values alone,
+// called with no instance, on any thread. `states` has one entry per parameter.
 static void param_rules(const SpcValue* values, uint32_t* states)
 {
-    spc::ParamRules r(get_descriptor(), values, states);
-    r.disable("resize_width", !r.on("resize_enable"));
-    r.disable("resize_height", !r.on("resize_enable"));
+    if (values[P_RESIZE_ENABLE].i == 0) {
+        states[P_RESIZE_WIDTH]  |= SPC_PARAM_STATE_DISABLED;
+        states[P_RESIZE_HEIGHT] |= SPC_PARAM_STATE_DISABLED;
+    }
 }
-
-// --- helpers ------------------------------------------------------------------
 
 // acquire pool frame or fallback buffer, copy input, return cv::Mat wrapping dst
 static cv::Mat acquire_and_copy_frame(BboxDisplayState* s, const SpcFrame* in,
                                       int cv_type, SpcFrame** out_pool_frame)
 {
-    *out_pool_frame = s->host.acquire_frame(0, in->width, in->height, in->format);
+    SpcHost* host = s->host;
+    *out_pool_frame = host->frame ? host->frame(host, 0, in->width, in->height, in->format)
+                                  : nullptr;
 
     uint8_t* dst_ptr;
     uint32_t dst_stride;
@@ -129,7 +171,7 @@ static void set_frame_output(BboxDisplayState* s, const SpcFrame* in,
 {
     if (pool_frame) {
         pool_frame->timestamp_ns = in->timestamp_ns;
-        pool_frame->frame_number = in->frame_number;
+        pool_frame->sequence = in->sequence;
         output->type = SPC_DATA_FRAME;
         output->frame = pool_frame;
     } else {
@@ -140,21 +182,19 @@ static void set_frame_output(BboxDisplayState* s, const SpcFrame* in,
     }
 }
 
-// --- process ------------------------------------------------------------------
-
-static int process(SpcPluginInstance* inst, const SpcData* inputs,
-                   uint32_t input_count, SpcData* outputs,
-                   uint32_t output_count)
+static int process(SpcPluginInstance* instance, SpcStep* step)
 {
-    auto* s = state(inst);
-    if (input_count < 2 || output_count < 1) return -1;
-    if (inputs[1].type != SPC_DATA_FRAME || !inputs[1].frame) return SPC_NO_DATA;
+    auto* s = state(instance);
+    SpcHost* host = s->host;
+    const Params& p = s->params;
+    const SpcData* inputs = step->inputs;
+    SpcData* outputs = step->outputs;
 
-    const SpcFrame* in = inputs[1].frame;
+    if (inputs[IN_IMAGE].type != SPC_DATA_FRAME || !inputs[IN_IMAGE].frame) return SPC_SKIP;
+
+    const SpcFrame* in = inputs[IN_IMAGE].frame;
     int cv_type = spc::cv_type_for_format(in->format);
-    if (cv_type < 0) return -1;
-
-    const Params p = s->params.snapshot();  // one consistent view per frame
+    if (cv_type < 0) return SPC_FAILED;
 
     SpcFrame* out_frame = nullptr;
     cv::Mat dst = acquire_and_copy_frame(s, in, cv_type, &out_frame);
@@ -171,11 +211,13 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
     }
 
     // draw boxes from the first input
-    if (inputs[0].type == SPC_DATA_TABLE && inputs[0].table) {
-        const SpcTable* tbl = inputs[0].table;
+    if (inputs[IN_BOXES].type == SPC_DATA_TABLE && inputs[IN_BOXES].table) {
+        const SpcTable* tbl = inputs[IN_BOXES].table;
 
-        // where each declared field is in this table's records; an optional
-        // field the producer does not send is SPC_NO_FIELD
+        // Where each declared field is in this table's records, which are
+        // laid out by the producer; an optional field the producer does not
+        // send is SPC_NO_FIELD. spc_table_get_* (table_helpers.h) read a field
+        // at its offset.
         const uint32_t* off = tbl->field_offsets;
         // prefer label_name (smoothed by track_class_enricher) over class_name
         // (raw detector / mode-of-history vote) — same convention as track_display
@@ -274,17 +316,23 @@ static int process(SpcPluginInstance* inst, const SpcData* inputs,
     {
         set_frame_output(s, in, out_frame, &outputs[0]);
     }
-    return 0;
+
+    // The resize and grayscale paths output an image of their own, so the pool
+    // frame the input was copied into is not emitted: a frame from
+    // host->frame() that is not emitted goes back to the host.
+    if ((p.resize_enable || was_grayscale) && out_frame && host->release_frame)
+        host->release_frame(host, out_frame);
+    return SPC_OK;
 }
 
-// --- export -------------------------------------------------------------------
-
-SPC_PLUGIN_VTABLE(
-    .get_descriptor    = get_descriptor,
-    .create_instance   = create_instance,
-    .destroy_instance  = destroy_instance,
-    .params_changed    = spc::params_by_name<get_descriptor, set_parameter>,
-    .param_rules       = param_rules,
-    .process           = process,
-    .set_host_services = set_host_services
-)
+extern "C" {
+SPC_API SpcPlugin spc_plugin = {
+    .abi            = SPC_ABI,
+    .info           = get_descriptor,
+    .start          = start,
+    .stop           = stop,
+    .process        = process,
+    .params_changed = params_changed,
+    .param_rules    = param_rules,
+};
+}

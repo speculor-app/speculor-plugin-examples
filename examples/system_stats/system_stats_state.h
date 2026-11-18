@@ -32,27 +32,22 @@ enum {
     FIELD_COUNT
 };
 
-// GUI-thread-set parameters, snapshotted on the worker (H6)
 struct Params
 {
-    int32_t update_interval_sec = 1;
-#ifdef _WIN32
-    char disk_path[SPC_PARAM_STRING_MAX] = "C:\\";
-#else
-    char disk_path[SPC_PARAM_STRING_MAX] = "/";
-#endif
+    int32_t update_interval_sec;
+    char disk_path[SPC_PARAM_STRING_MAX];
 };
 
 struct SystemStatsState
 {
-    spc::HostServices host;
+    SpcHost* host = nullptr;   // valid until stop() returns
+    SpcLogContext log{};
+    Params params{};
 
-    // outputs
-    SpcRecord output_record{};
-    std::string record_json;
-
-    // cross-thread parameter block (GUI writes, worker snapshots per frame)
-    spc::SharedParams<Params> params;
+    // The JSON output is the plugin's own: it must stay valid until process()
+    // returns, and the engine copies it.
+    SpcJson output_json{};
+    std::string json_text;
 
     // static info (read once in start())
     char cpu_name[128]{};
@@ -80,7 +75,7 @@ struct SystemStatsState
 
     // pacing
     std::chrono::steady_clock::time_point last_emit;
-    uint64_t frame_number = 0;
+    uint64_t sequence = 0;
 };
 
 // sampling result types
