@@ -171,20 +171,18 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     // them, until the node takes them here, on its own thread. Each is valid
     // until the next take on the same port. (The input's slot in the step is
     // always SPC_DATA_NONE.)
-    if (host->take_signal) {
-        while (const SpcTable* block = host->take_signal(host, IN_SIGNAL)) {
-            // where `amplitude` is in this producer's records: field_offsets
-            // has one entry per field the input declares, and
-            // spc_table_get_float (table_helpers.h) reads it there
-            const uint32_t off = block->field_offsets[F_IN_AMPLITUDE];
-            for (uint32_t i = 0; i < block->record_count; ++i) {
-                s->window_buf[s->window_pos] = spc_table_get_float(block, i, off);
-                s->window_pos = (s->window_pos + 1) % ws;
-            }
-            if (block->record_count > 0) s->fresh = true;
-            if (block->sample_rate_hz > 0.0)
-                s->upstream_sample_rate = block->sample_rate_hz;
+    while (const SpcTable* block = host->take_signal(host, IN_SIGNAL)) {
+        // where `amplitude` is in this producer's records: field_offsets
+        // has one entry per field the input declares, and
+        // spc_table_get_float (table_helpers.h) reads it there
+        const uint32_t off = block->field_offsets[F_IN_AMPLITUDE];
+        for (uint32_t i = 0; i < block->record_count; ++i) {
+            s->window_buf[s->window_pos] = spc_table_get_float(block, i, off);
+            s->window_pos = (s->window_pos + 1) % ws;
         }
+        if (block->record_count > 0) s->fresh = true;
+        if (block->sample_rate_hz > 0.0)
+            s->upstream_sample_rate = block->sample_rate_hz;
     }
 
     // rate limiting
@@ -262,7 +260,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     float dominant_freq = static_cast<float>(max_bin) * bin_resolution;
 
     // one row in a table the host lends for output 0, valid until process() returns
-    SpcTable* out = host->table ? host->table(host, 0, 1) : nullptr;
+    SpcTable* out = host->table(host, 0, 1);
     if (!out) return SPC_FAILED;
     const uint32_t* off = out->field_offsets;
 
@@ -285,13 +283,10 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     return SPC_OK;
 }
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)

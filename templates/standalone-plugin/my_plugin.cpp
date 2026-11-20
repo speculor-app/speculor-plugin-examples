@@ -7,8 +7,8 @@
 // those CMakeLists are a single line and not what you would write.
 //
 // The plugin is the boundary in speculor/plugin.h, written out: each function
-// below fills a slot of SpcPlugin, and spc_plugin at the bottom is the one
-// symbol the library exports. A slot the plugin has no use for stays null.
+// below fills a slot of SpcPlugin, and SPC_EXPORT_PLUGIN at the bottom defines
+// spc_plugin, the one symbol the library exports. A slot the plugin has no use for stays null.
 
 #include <speculor/plugin.h>          // the boundary: every type and call that crosses it
 #include <speculor/plugin_helpers.h>  // conveniences compiled into the plugin
@@ -24,7 +24,7 @@ enum Param : uint32_t {
     P_GAIN,
 };
 
-// The info slot. SPC_PLUGIN_DESCRIPTOR defines get_descriptor(), which builds
+// The info slot. SPC_PLUGIN_DESCRIPTOR defines info(), which builds
 // the SpcNodeInfo on the first call and keeps it, and all it points at, while
 // the library is loaded. DescriptorBuilder is a convenience for filling it.
 SPC_PLUGIN_DESCRIPTOR(
@@ -96,8 +96,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
 
     // A frame from the host's pool is written in place and published without
     // a copy. When the host lends none, a frame of the plugin's own is copied.
-    // A function the host does not provide is null.
-    SpcFrame* out = host->frame ? host->frame(host, 0, w, h, SPC_PIXEL_FORMAT_RGB24) : nullptr;
+    SpcFrame* out = host->frame(host, 0, w, h, SPC_PIXEL_FORMAT_RGB24);
     if (!out) s->buffer.resize(static_cast<size_t>(w) * h * 3);
     uint8_t* dst = out ? out->data : s->buffer.data();
     const uint32_t dst_stride = out ? out->stride : w * 3;
@@ -131,19 +130,16 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     return SPC_OK;
 }
 
-// The one symbol the engine looks up. It loads the plugin only when `abi`
-// equals its own SPC_ABI; a slot left out is null, a call the plugin does
-// without. The slots, in the order SpcPlugin declares them (which designated
-// initializers must follow): info, start, stop, process, interrupt,
-// params_changed, record_gpu, ui_input, control_reply, param_rules,
-// list_options.
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+// spc_plugin, the one symbol the engine looks up, with its `abi` set to
+// SPC_ABI: the engine loads the plugin only when that equals its own. A slot
+// left out is null, a call the plugin does without. The slots, in the order
+// SpcPlugin declares them (which designated initializers must follow): info,
+// start, stop, process, interrupt, params_changed, record_gpu, ui_input,
+// control_reply, param_rules, list_options.
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)

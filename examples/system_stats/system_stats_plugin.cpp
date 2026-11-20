@@ -148,7 +148,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     s->prev_net_recv = net.recv;
 
     // --- one row, in a table the host lends until process() returns ---
-    SpcTable* out = host->table ? host->table(host, OUT_STATS, 1) : nullptr;
+    SpcTable* out = host->table(host, OUT_STATS, 1);
     if (!out) return SPC_FAILED;
     // where each field of the port is in a record, in declaration order
     const uint32_t* off = out->field_offsets;
@@ -209,13 +209,10 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     return SPC_OK;
 }
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)

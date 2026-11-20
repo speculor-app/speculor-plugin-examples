@@ -122,28 +122,27 @@ application's `plugins/` directory.
 
 ## Plugin Shape
 
-The examples write the boundary in `speculor/plugin.h` out. They do not use the SDK's composition layer (`spc::PluginSlots`, `SPC_PLUGIN` / `SPC_PLUGIN_STATE`, `create_instance`, `destroy_instance`, `set_host_services`, `spc::params_by_name`, `spc::HostServices`). In C++, `SPC_EXPORT_PLUGIN` builds the exported struct from that layer, so each example defines it by hand:
+The examples write the boundary in `speculor/plugin.h` out. They do not use the SDK's composition layer (`spc::PluginSlots`, `SPC_EXPORT_PLUGIN_SLOTS`, `SPC_PLUGIN` / `SPC_PLUGIN_STATE`, `create_instance`, `destroy_instance`, `set_host_services`, `spc::params_by_name`, `spc::HostServices`). Each exports `SpcPlugin`'s own slots with `SPC_EXPORT_PLUGIN` (`plugin.h`), which defines `spc_plugin` with `abi` set:
 
 ```cpp
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,    // defined by SPC_PLUGIN_DESCRIPTOR
+SPC_EXPORT_PLUGIN(
+    .info           = info,    // defined by SPC_PLUGIN_DESCRIPTOR
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
+    .params_changed = params_changed
     // .interrupt / .record_gpu / .ui_input / .control_reply / .param_rules /
     // .list_options as needed — in SpcPlugin's declaration order: info, start,
     // stop, process, interrupt, params_changed, record_gpu, ui_input,
     // control_reply, param_rules, list_options
-};
-}
+)
 ```
+
+A slot only a Vulkan build has goes in as `SPC_IF_VULKAN(.record_gpu = record_gpu,)`, since no `#ifdef` can go inside the macro's arguments, and so does the GPU use the node info declares: `SPC_IF_VULKAN(.gpu_compute())` (see `wmv_bgs`). Every function of the host a running node gets is set, so an example calls `host->fn(host, ...)` without checking it first.
 
 - `static SpcPluginInstance* start(SpcHost* host, const SpcValue* values)` allocates the state, keeps `host` when the plugin calls it, takes the values and returns the instance, or null after logging why (undoing what it made: `stop()` is not called then). `static void stop(SpcPluginInstance*)` tears the instance down and frees it.
 - **Parameters by position.** An `enum Param` of indices next to the declarations; with more than one parameter, a `Params` struct filled by `read_params(values)` in `start()` and `params_changed()`. A STRING value lives only during the call: copy it. The host holds every value and has checked it against the declaration, so the plugin never validates or answers for one. Never change a declared id, default or range: projects save them. A parameter greyed out by other values is a `param_rules` function of the values alone, indexed by the same enum (see `bbox_display`).
-- **Host calls** go through the `SpcHost*` directly where that is one line, null-checked, since a function the host does not provide is null (`host->table ? host->table(host, port, rows) : nullptr`). SDK conveniences only where they do real work: `SPC_PLUGIN_DESCRIPTOR` / `DescriptorBuilder`, `spc::log_context` + `SPC_LOG_*`, `spc::ControlOut`, the table accessors, the GPU helpers. Say in one comment, where a convenience is first used, which host call it wraps.
+- **Host calls** go through the `SpcHost*` directly where that is one line (`host->table(host, port, rows)`); every function is set, so none is null-checked. SDK conveniences only where they do real work: `SPC_PLUGIN_DESCRIPTOR` / `DescriptorBuilder`, `spc::log_context` + `SPC_LOG_*`, `spc::ControlOut`, the table accessors, the GPU helpers. Say in one comment, where a convenience is first used, which host call it wraps.
 - **Threads.** The engine calls an instance one call at a time (interrupt aside), so its state needs no lock. `interrupt` sets flags and cuts blocking I/O only. `param_rules` and `list_options` take no instance.
 
 ## Tables

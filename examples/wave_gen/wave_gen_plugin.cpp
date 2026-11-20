@@ -176,9 +176,8 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     }
 
     // The host lends the output table: to_generate zeroed records of the
-    // port's schema, the host's until process() returns. A function the host
-    // does not provide is null.
-    SpcTable* out = host->table ? host->table(host, 0, to_generate) : nullptr;
+    // port's schema, the host's until process() returns.
+    SpcTable* out = host->table(host, 0, to_generate);
     if (!out) return SPC_FAILED;
     // where each field of the port is in a record, in declaration order
     const uint32_t* off = out->field_offsets;
@@ -208,13 +207,10 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     return SPC_OK;
 }
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)
