@@ -110,7 +110,7 @@ bool WmvGpuPipeline::prepare(VulkanContext &ctx, uint32_t width, uint32_t height
 
 bool WmvGpuPipeline::record(VulkanContext &ctx, VkCommandBuffer cmd,
                              VkBuffer in_staging,
-                             VkBuffer out_device, VkBuffer out_staging,
+                             VkBuffer out_device,
                              const uint8_t *mask_in, int mask_stride,
                              const WmvPushConstants &params,
                              VkBuffer gpu_input)
@@ -143,7 +143,7 @@ bool WmvGpuPipeline::record(VulkanContext &ctx, VkCommandBuffer cmd,
         return true;
     }
 
-    if (out_device == VK_NULL_HANDLE || out_staging == VK_NULL_HANDLE) return false;
+    if (out_device == VK_NULL_HANDLE) return false;
 
     // copy mask to the plugin's own staging if present
     if (mask_in)
@@ -217,14 +217,6 @@ bool WmvGpuPipeline::record(VulkanContext &ctx, VkCommandBuffer cmd,
                              push_bufs_, push_sizes_, NUM_BUFFERS + 1,
                              pc, pack_groups, 1);
     }
-    // Download to the OUTPUT ring slot's staging — engine handles the wait +
-    // invalidate via the registry. Non-wide (active) path downloads the compute
-    // shader's direct output (out_device).
-    barrier_compute_to_transfer();
-    StagingBuffer out_stg{}; out_stg.buffer = out_staging;
-    cmd_download_to_staging(use_wide_layout_ ? packed_mask_buf_ : out_device,
-                            out_stg,
-                            use_wide_layout_ ? mask_byte_size_ : mask_bytes_);
     return true;
 }
 

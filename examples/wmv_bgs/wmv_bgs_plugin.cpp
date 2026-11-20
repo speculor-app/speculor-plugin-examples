@@ -45,7 +45,7 @@ SPC_PLUGIN_DESCRIPTOR(
         .input("mask_in", "Detect Mask", SPC_DATA_FRAME, 4, SPC_CONSUME_NON_BLOCKING)
         .output("mask_out", "FG Mask", SPC_DATA_FRAME)
         .output("image_out", "Image", SPC_DATA_FRAME)
-        .gpu_compute()   // SPC_GPU_RECORDED; the engine adds gpu_enabled and gpu_profile
+        SPC_IF_VULKAN(.gpu_compute())   // SPC_GPU_RECORDED; the engine adds gpu_enabled and gpu_profile
         .bool_param("enable_threshold", "Enable Threshold", true, "WMV")
             .param_help("Apply threshold to the weighted difference image")
         .float_param("threshold", "Threshold", 1.0f, 255.0f, 30.0f, 0.5f, "WMV")
@@ -377,19 +377,19 @@ static int record_gpu(SpcPluginInstance* instance, SpcStep* step, SpcGpuPass* pa
     auto cmd = static_cast<VkCommandBuffer>(pass->cmd_buffer_handle);
     if (!cmd) return SPC_FAILED;
 
-    SpcFrame* out = host->frame ? host->frame(host, OUT_MASK, w, h, SPC_PIXEL_FORMAT_GRAY8)
-                                : nullptr;
+    SpcFrame* out = host->frame(host, OUT_MASK, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (!out) return SPC_FAILED;
 
     // This frame's slot of the engine's output ring: the compute writes its
-    // device buffer, a download copies it into the staging, and the returned
-    // gpu_handle names it downstream. Taken on warmup frames too, though
-    // record() leaves it unwritten then.
+    // device buffer, and the returned gpu_handle names it downstream. The
+    // engine copies it to the CPU when a CPU node reads the mask; the staging
+    // is null otherwise. Taken on warmup frames too, though record() leaves it
+    // unwritten then.
     SpcGpuEdgeBuffer outbuf = spc::acquire_ringed_output(
         pass, OUT_MASK, w, h, out->stride, SPC_PIXEL_FORMAT_GRAY8,
         static_cast<uint64_t>(s->vk_pipeline.output_device_size()),
         static_cast<uint64_t>(s->vk_pipeline.output_staging_size()));
-    if (!outbuf.device_buffer || !outbuf.staging_buffer || outbuf.gpu_handle == 0)
+    if (!outbuf.device_buffer || outbuf.gpu_handle == 0)
         return release_unused(host, out);
 
     // CPU-fed input: copy the frame into this frame's upload slot (the rolling
@@ -404,7 +404,6 @@ static int record_gpu(SpcPluginInstance* instance, SpcStep* step, SpcGpuPass* pa
     if (!s->vk_pipeline.record(*s->vk_ctx, cmd,
                                 in_staging,
                                 static_cast<VkBuffer>(outbuf.device_buffer),
-                                static_cast<VkBuffer>(outbuf.staging_buffer),
                                 mask_in_ptr, det_mask_stride,
                                 pc, gpu_input_buf))
         return release_unused(host, out);

@@ -53,11 +53,12 @@ public:
     //   in_staging — upload ring slot's host-visible staging; the plugin
     //                already memcpy'd the CPU frame in. Copied into the rolling
     //                buffer bufs_[target]. Ignored when gpu_input != NULL.
-    //   out_device / out_staging — output ring slot (binding 4 + download dst).
-    //                Only used once ready(); on warmup frames pass NULL.
+    //   out_device — output ring slot (binding 4). The engine copies it to
+    //                the CPU when a CPU node reads the mask. Only used once
+    //                ready(); on warmup frames pass NULL.
     bool record(VulkanContext &ctx, VkCommandBuffer cmd,
                 VkBuffer in_staging,
-                VkBuffer out_device, VkBuffer out_staging,
+                VkBuffer out_device,
                 const uint8_t *mask_in, int mask_stride,
                 const WmvPushConstants &params,
                 VkBuffer gpu_input = VK_NULL_HANDLE);
@@ -66,8 +67,7 @@ public:
 
     // Byte sizes the plugin passes to the ring calls of the engine's
     // SpcGpuPass. The output device buffer + staging are mask_bytes_
-    // (width4*4*height, the padded packed size the compute writes + the
-    // download copies).
+    // (width4*4*height, the padded packed size the compute writes).
     VkDeviceSize input_device_size() const { return frame_bytes_; }
     VkDeviceSize output_device_size() const { return mask_bytes_; }
     VkDeviceSize output_staging_size() const { return mask_bytes_; }
@@ -111,8 +111,7 @@ private:
     VkDeviceSize push_sizes_[NUM_BUFFERS + 1] = {};
 
     // staging for the optional detect mask (host-visible, mapped). The input
-    // frame upload staging + output download staging are engine-owned ring
-    // slots (acquire_ringed_upload / acquire_ringed_output).
+    // frame upload staging is an engine-owned ring slot (acquire_ringed_upload).
     StagingBuffer staging_mask_;
 
     uint32_t width_ = 0;
