@@ -1,6 +1,6 @@
 // Outputs a constant scalar, set by its one parameter. The smallest plugin:
-// each function below fills a slot of SpcPlugin (speculor/plugin.h), and the
-// struct at the bottom, spc_plugin, is all the library exports.
+// each function below fills a slot of SpcPlugin (speculor/plugin.h), and
+// SPC_EXPORT_PLUGIN at the bottom defines spc_plugin, all the library exports.
 
 #include <speculor/plugin.h>          // the boundary: every type and call that crosses it
 #include <speculor/plugin_helpers.h>  // conveniences compiled into the plugin
@@ -14,7 +14,7 @@ enum Param : uint32_t {
     P_VALUE,
 };
 
-// The info slot. SPC_PLUGIN_DESCRIPTOR defines get_descriptor(), which builds
+// The info slot. SPC_PLUGIN_DESCRIPTOR defines info(), which builds
 // the SpcNodeInfo on the first call and keeps it, and all it points at, while
 // the library is loaded. DescriptorBuilder is a convenience for filling it.
 SPC_PLUGIN_DESCRIPTOR(
@@ -77,16 +77,13 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     return SPC_OK;
 }
 
-// The one symbol the engine looks up. It loads the plugin only when `abi`
-// equals its own SPC_ABI; a slot left out is null, a call the plugin does
-// without.
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+// spc_plugin, the one symbol the engine looks up, with its `abi` set to
+// SPC_ABI: the engine loads the plugin only when that equals its own. A slot
+// left out is null, a call the plugin does without.
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)

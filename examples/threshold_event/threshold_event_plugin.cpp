@@ -119,17 +119,14 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     e.detail    = detail;
     e.data_json = data_json;
 
-    if (host->emit_event) host->emit_event(host, &e);
+    host->emit_event(host, &e);
     return SPC_OK;
 }
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)

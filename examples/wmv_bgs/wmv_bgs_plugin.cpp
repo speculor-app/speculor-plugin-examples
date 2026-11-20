@@ -228,8 +228,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
                              static_cast<size_t>(in_frame->stride));
     const cv::Mat& detect_mask = s->has_cached_mask ? s->cached_mask : s->empty_mask;
 
-    SpcFrame* out = host->frame ? host->frame(host, OUT_MASK, w, h, SPC_PIXEL_FORMAT_GRAY8)
-                                : nullptr;
+    SpcFrame* out = host->frame(host, OUT_MASK, w, h, SPC_PIXEL_FORMAT_GRAY8);
     if (out)
     {
         // the mask is written straight into the pool frame, which is the
@@ -261,7 +260,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
 // a frame from host->frame() that is not emitted goes back to the host
 static int release_unused(SpcHost* host, SpcFrame* frame)
 {
-    if (host->release_frame) host->release_frame(host, frame);
+    host->release_frame(host, frame);
     return SPC_FAILED;
 }
 
@@ -429,17 +428,12 @@ static int record_gpu(SpcPluginInstance* instance, SpcStep* step, SpcGpuPass* pa
 }
 #endif
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
     .params_changed = params_changed,
-#ifdef SPC_HAS_VULKAN
-    .record_gpu     = record_gpu,
-#endif
-    .param_rules    = param_rules,
-};
-}
+    SPC_IF_VULKAN(.record_gpu = record_gpu,)
+    .param_rules    = param_rules
+)

@@ -95,7 +95,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     // both timelines and the clock's quality in one reading; all zero from a
     // host that has no clock to lend
     SpcTimeInfo t{};
-    if (host->time) host->time(host, &t);
+    host->time(host, &t);
 
     char buf[256];
     std::snprintf(buf, sizeof(buf),
@@ -113,13 +113,10 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     return SPC_OK;
 }
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)

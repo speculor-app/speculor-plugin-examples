@@ -186,7 +186,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
 
     // a GPU-resident mask needs its pixels on the CPU first
     if ((in_frame->gpu_flags & SPC_GPU_FLAG_RESIDENT) &&
-        !(in_frame->gpu_flags & SPC_GPU_FLAG_CPU_VALID) && host->ensure_cpu_data) {
+        !(in_frame->gpu_flags & SPC_GPU_FLAG_CPU_VALID)) {
         host->ensure_cpu_data(host, in_frame);
     }
 
@@ -203,7 +203,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
 
     // one record per blob in a table the host lends, valid until process()
     // returns; spc_table_set_* (table_helpers.h) write a field at its offset
-    SpcTable* out = host->table ? host->table(host, OUT_BOXES, count) : nullptr;
+    SpcTable* out = host->table(host, OUT_BOXES, count);
     if (!out) return SPC_FAILED;
     const uint32_t* off = out->field_offsets;
 
@@ -301,14 +301,11 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     return SPC_OK;
 }
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
     .params_changed = params_changed,
-    .param_rules    = param_rules,
-};
-}
+    .param_rules    = param_rules
+)

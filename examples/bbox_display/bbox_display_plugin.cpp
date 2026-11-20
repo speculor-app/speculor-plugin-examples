@@ -143,8 +143,7 @@ static cv::Mat acquire_and_copy_frame(BboxDisplayState* s, const SpcFrame* in,
                                       int cv_type, SpcFrame** out_pool_frame)
 {
     SpcHost* host = s->host;
-    *out_pool_frame = host->frame ? host->frame(host, 0, in->width, in->height, in->format)
-                                  : nullptr;
+    *out_pool_frame = host->frame(host, 0, in->width, in->height, in->format);
 
     uint8_t* dst_ptr;
     uint32_t dst_stride;
@@ -320,19 +319,16 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     // The resize and grayscale paths output an image of their own, so the pool
     // frame the input was copied into is not emitted: a frame from
     // host->frame() that is not emitted goes back to the host.
-    if ((p.resize_enable || was_grayscale) && out_frame && host->release_frame)
+    if ((p.resize_enable || was_grayscale) && out_frame)
         host->release_frame(host, out_frame);
     return SPC_OK;
 }
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
     .params_changed = params_changed,
-    .param_rules    = param_rules,
-};
-}
+    .param_rules    = param_rules
+)

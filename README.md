@@ -130,7 +130,7 @@ out.
 enum Param : uint32_t { P_GAIN };
 
 // 2. The node info (the `info` slot): ports and parameter declarations.
-//    SPC_PLUGIN_DESCRIPTOR defines get_descriptor(), built once and kept.
+//    SPC_PLUGIN_DESCRIPTOR defines info(), built once and kept.
 SPC_PLUGIN_DESCRIPTOR(
     spc::DescriptorBuilder("my_plugin", "My Plugin", "Category")
         .author("You").version("1.0.0")
@@ -168,17 +168,14 @@ static int process(SpcPluginInstance* instance, SpcStep* step) {
     return SPC_OK;
 }
 
-// 6. The one symbol the library exports. A slot left out is null.
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+// 6. The one symbol the library exports, spc_plugin. A slot left out is null.
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)
 ```
 
 **Lifecycle and threads.** `start(host, values)` makes an instance when the node
@@ -205,8 +202,8 @@ next `start()` gets it (see `udp_scalar_source`).
 
 **Host calls.** Every call to the engine goes through the `SpcHost` that
 `start()` was handed, with the host itself as the first argument:
-`host->table(host, port, rows)`, `host->emit_event(host, &event)`. A function
-the host does not provide is null, so check before calling. Where a call needs
+`host->table(host, port, rows)`, `host->emit_event(host, &event)`. Every
+function is set, so a call needs no check first. Where a call needs
 work around it, an example uses an SDK convenience compiled into the plugin and
 says where it first appears what call it wraps: `spc::log_context(host)` for
 printf-style logging over `host->log`, `spc::ControlOut` over `host->control`,
@@ -231,11 +228,11 @@ each block the producer sends and holds it until the node takes it with
 **GPU.** A GPU plugin adds a Vulkan pipeline and shaders, and a `record_gpu`
 slot that records into the engine's command buffer (see `wmv_bgs`).
 
-**The SDK's composition layer.** `plugin_macros.h` also has `SPC_EXPORT_PLUGIN`,
-which in C++ builds `spc_plugin` from another set of functions held in
-`spc::PluginSlots` (`create_instance`, `set_host_services`, a per-name
-`set_parameter` through `spc::params_by_name`). These examples write the
-boundary out instead, so every function in them is a slot of `SpcPlugin`.
+**The SDK's composition layer.** `plugin_macros.h` also has
+`SPC_EXPORT_PLUGIN_SLOTS`, which builds `spc_plugin` from another set of
+functions held in `spc::PluginSlots` (`create_instance`, `set_host_services`,
+a per-name `set_parameter` through `spc::params_by_name`). These examples write
+the boundary out instead, so every function in them is a slot of `SpcPlugin`.
 
 ## CMakeLists.txt for your own plugin
 

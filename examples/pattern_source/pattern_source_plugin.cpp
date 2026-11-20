@@ -105,8 +105,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
 
     // A frame from the host's pool is drawn in place and published without a
     // copy. When the host lends none, a frame of the plugin's own is copied.
-    SpcFrame* out_frame = host->frame ? host->frame(host, 0, w, h, SPC_PIXEL_FORMAT_RGB24)
-                                      : nullptr;
+    SpcFrame* out_frame = host->frame(host, 0, w, h, SPC_PIXEL_FORMAT_RGB24);
     if (!out_frame) s->buffer.resize(static_cast<size_t>(w) * h * 3);
 
     uint8_t* dst = out_frame ? out_frame->data : s->buffer.data();
@@ -141,13 +140,10 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     return SPC_OK;
 }
 
-extern "C" {
-SPC_API SpcPlugin spc_plugin = {
-    .abi            = SPC_ABI,
-    .info           = get_descriptor,
+SPC_EXPORT_PLUGIN(
+    .info           = info,
     .start          = start,
     .stop           = stop,
     .process        = process,
-    .params_changed = params_changed,
-};
-}
+    .params_changed = params_changed
+)
