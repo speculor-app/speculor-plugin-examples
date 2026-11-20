@@ -273,8 +273,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
 
     out->sample_rate_hz = sr;
     out->sequence = s->sequence++;
-    out->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        now - s->last_output_time).count();
+    out->timestamp_ns = host->now_utc_ns(host);   // the engine's UTC clock
 
     s->last_output_time = now;
 

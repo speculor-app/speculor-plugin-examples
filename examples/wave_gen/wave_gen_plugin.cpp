@@ -194,10 +194,9 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
         if (s->phase >= 1.0) s->phase -= 1.0;
     }
 
-    // timestamp from cumulative sample position
     out->sequence = s->sample_count / min_batch;
-    out->timestamp_ns = static_cast<int64_t>(
-        static_cast<double>(s->sample_count) / static_cast<double>(p.sample_rate) * 1e9);
+    // the engine's UTC clock, which every timestamp is on
+    out->timestamp_ns = host->now_utc_ns(host);
 
     s->sample_count += to_generate;
 

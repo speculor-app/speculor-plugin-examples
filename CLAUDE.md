@@ -147,7 +147,7 @@ A slot only a Vulkan build has goes in as `SPC_IF_VULKAN(.record_gpu = record_gp
 
 ## Tables
 
-A table or signal output comes from the host: `host->table(host, output, rows)` lends a zeroed table of that output port's schema, valid until `process()` returns. Fill it, set its header (`timestamp_ns`, `sequence`, and `sample_rate_hz` on a signal), and put it in the step's outputs; the host publishes it with no copy. A new one is lent every call. It may have its `record_count` lowered and must not be kept, resized or freed. Do not keep an `SpcTable` member with `spc_table_init` / `spc_table_resize`.
+A table or signal output comes from the host: `host->table(host, output, rows)` lends a zeroed table of that output port's schema, valid until `process()` returns. Fill it, set its header (`timestamp_ns` from `host->now_utc_ns(host)`, `sequence`, and `sample_rate_hz` on a signal), and put it in the step's outputs; the host publishes it with no copy. A new one is lent every call. It may have its `record_count` lowered and must not be kept, resized or freed. Do not keep an `SpcTable` member with `spc_table_init` / `spc_table_resize`.
 
 Every table carries `field_offsets`. On a lent table it has one entry per field of the output port. On an input table it has one entry per field the input port declares, in declaration order: the `input_table()` fields, then the `.optional_fields({...})` ones, whose entry is `SPC_NO_FIELD` when the producer sends no field of that id and type. Declare every field the plugin reads and index `field_offsets` with an enum in the same order; never call `spc_schema_field_offset` on an input table.
 
