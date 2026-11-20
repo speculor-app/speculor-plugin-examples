@@ -176,8 +176,7 @@ static int process(SpcPluginInstance* instance, SpcStep* step)
     spc_table_set_uint32(out, 0, off[F_CPU_FREQ_MHZ],     s->cpu_freq_mhz);
 
     out->sequence = s->sequence++;
-    out->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        now.time_since_epoch()).count();
+    out->timestamp_ns = host->now_utc_ns(host);   // the engine's UTC clock
 
     step->outputs[OUT_STATS].type = SPC_DATA_TABLE;
     step->outputs[OUT_STATS].table = out;
